@@ -360,3 +360,9 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# Local game dependencies, probes, and extracted assets (never redistribute).
+.local/
+animation-output/
+tools/knight-animations/build/
+tools/knight-animations/__pycache__/

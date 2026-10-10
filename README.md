@@ -1,4 +1,12 @@
 # ThreeRingsSharp
+
+## Player-knight animation export
+
+See [the knight animation extension](tools/knight-animations/README.md) for a
+game-native reader and Blender importer. It exports the original knight rig and
+named Actions, with a tested 150-clip bundle and explicit coverage reports.
+This command-line extension is separate from the legacy GUI and level exporter.
+
 Abbreviated as TRS or TR#, this is port of Grey Havens's *Clyde*, *Narya*, *Nenya*, and *Vilya* libraries (as well as their dependencies) into C# via IKVM, because let's face it: Java is kinda stupid.
 
 This program rips models from any Clyde-based game (mostly intended for Spiral Knights) and converts it to the glTF 2.0 format so you can use it for animations or whatever it may be.
