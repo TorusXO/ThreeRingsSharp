@@ -11,6 +11,7 @@ from mathutils import Matrix
 data = json.loads(Path(sys.argv[sys.argv.index("--")+1]).read_text(encoding="utf-8"))
 rig = next(o for o in bpy.data.objects if o.type == "ARMATURE" and "trs_source_bundle" in o)
 bones = data["bones"]
+name_map = json.loads(rig.get("trs_bone_name_map", "{}"))
 indices = {b["name"]: i for i, b in enumerate(bones)}
 actions = {a.get("trs_source"): a for a in bpy.data.actions if "trs_source" in a}
 assert len(actions) == len(data["clips"])
@@ -30,7 +31,7 @@ for clip in data["clips"]:
             p = bone["parent"]
             expected = local[i] if p < 0 else world[p] @ local[i]
             world.append(expected)
-            actual = rig.pose.bones[bone["name"]].matrix
+            actual = rig.pose.bones[name_map.get(bone["name"], bone["name"])].matrix
             error = max(abs(actual[r][c]-expected[r][c]) for r in range(4) for c in range(4))
             maximum = max(maximum, error)
             assert error < 0.001, (clip["name"], sample_index, bone["name"], error)

@@ -364,5 +364,6 @@ FodyWeavers.xsd
 # Local game dependencies, probes, and extracted assets (never redistribute).
 .local/
 animation-output/
+scene-output/
 tools/knight-animations/build/
 tools/knight-animations/__pycache__/

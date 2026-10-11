@@ -40,3 +40,6 @@ This repository effectively represents "Spiral Knights Animator Tools 2".
 All referenced DLL files that have been converted with IKVM are, for obvious reasons, not included in the MIT license associated with ThreeRingsSharp. The license included strictly applies to the code I have authored in this project.
 
 The licenses for the referenced code can be located in [_LICENSES_EXTERNAL.MD](https://github.com/XanTheDragon/ThreeRingsSharp/blob/master/_LICENSES_EXTERNAL.MD)
+# Qt export frontend (preview)
+
+The fork includes a [Qt/C++ frontend](qt/README.md) for knight animations, selected archived levels and skybox export to Blender. The original C# backend remains unchanged and accessible from the frontend. See the frontend documentation for build steps, native recoloring, shared mesh/texture data, and current runtime-effect limitations.
