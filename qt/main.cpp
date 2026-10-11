@@ -8,6 +8,7 @@
 #include <functional>
 
 struct Step { QString title, program; QStringList arguments; int maximumExit = 0; };
+struct SceneIdentity { QString id, title, method; };
 
 // Process boundaries isolate old IKVM/.NET and current Java formats from Qt.
 // No parsing/exporting code from the working legacy backend is modified.
@@ -24,7 +25,9 @@ class Studio : public QMainWindow {
     QList<Step> pending;
     Step active;
     QFile logFile;
-    QString resultPath, bundlePath, mode, selectedOutput, stagingPath, exportPrefix, currentSource;
+    QString resultPath, bundlePath, mode, selectedOutput, stagingPath, exportPrefix, previousPrefix, currentSource;
+    SceneIdentity currentScene;
+    QHash<QString,QString> sceneNames,sceneFingerprints;
     bool batch = false, busy = false, cancelled = false;
     QSettings settings;
     QJsonObject defaults;
@@ -76,9 +79,39 @@ class Studio : public QMainWindow {
             QDir(stagingPath).removeRecursively();
         stagingPath.clear();
     }
-    static QString prefixFor(const QString &kind,const QString &source,const QString &gamePath) {
+    void loadSceneCatalog() {
+        auto read=[this](const QString &file,QHash<QString,QString> &target){
+            QFile input(backend(file));
+            if(!input.open(QIODevice::ReadOnly))return;
+            while(!input.atEnd()){
+                const QString row=QString::fromUtf8(input.readLine()).trimmed();
+                if(row.startsWith('#'))continue;
+                const int tab=row.indexOf('\t');
+                if(tab>0)target.insert(row.left(tab),row.mid(tab+1));
+            }
+        };
+        read("scene-names.tsv",sceneNames);
+        read("scene-fingerprints.tsv",sceneFingerprints);
+    }
+    SceneIdentity identifyScene(const QString &source) const {
+        const QString base=QFileInfo(source).completeBaseName();
+        QString id,method;
+        if(sceneNames.contains(base)){id=base;method="archive filename";}
+        else {
+            QFile input(source);
+            if(input.open(QIODevice::ReadOnly)){
+                QCryptographicHash hash(QCryptographicHash::Sha256);
+                if(hash.addData(&input)){
+                    const QString sha=QString::fromLatin1(hash.result().toHex());
+                    id=sceneFingerprints.value(sha);if(!id.isEmpty())method="archive content match";
+                }
+            }
+        }
+        return {id,sceneNames.value(id),method};
+    }
+    static QString prefixFor(const QString &kind,const QString &source,const QString &gamePath,const QString &displayTitle={}) {
         const QString identity=kind=="animation"?QFileInfo(gamePath).absoluteFilePath():QFileInfo(source).absoluteFilePath();
-        QString slug=kind=="animation"?"knight-animations":QFileInfo(source).completeBaseName().toLower();
+        QString slug=kind=="animation"?"knight-animations":displayTitle.isEmpty()?QFileInfo(source).completeBaseName().toLower():displayTitle.toLower();
         if(kind=="skybox")slug=QFileInfo(source).dir().dirName().toLower()+"-"+slug;
         slug.replace(QRegularExpression("[^a-z0-9]+"),"-");
         slug=slug.left(48);while(slug.endsWith('-'))slug.chop(1);
@@ -92,6 +125,27 @@ class Studio : public QMainWindow {
         if(file.endsWith(".blend",Qt::CaseInsensitive))return exportPrefix+".blend";
         if(relative.startsWith("fbx/"))return exportPrefix+"."+file;
         return exportPrefix+"."+file;
+    }
+    void cleanPreviousPrefix() {
+        if(previousPrefix.isEmpty()||previousPrefix==exportPrefix)return;
+        QFile oldManifest(QDir(selectedOutput).filePath(previousPrefix+".manifest.json"));
+        if(oldManifest.open(QIODevice::ReadOnly)){
+            const QJsonArray files=QJsonDocument::fromJson(oldManifest.readAll()).array();oldManifest.close();
+            for(const QJsonValue &value:files){
+                const QString file=value.toString();
+                if(file.startsWith(previousPrefix+".") && !file.contains("..") && !QDir::isAbsolutePath(file))
+                    QFile::remove(QDir(selectedOutput).filePath(file));
+            }
+            QFile::remove(oldManifest.fileName());
+        }
+        QFile oldLog(QDir(selectedOutput).filePath(previousPrefix+".export.log"));
+        if(oldLog.open(QIODevice::ReadOnly)){
+            const QByteArray header=oldLog.read(4096);oldLog.close();
+            if(header.contains("Source: "+currentSource.toUtf8()+"\n")){
+                QFile::remove(oldLog.fileName());
+                QFile::remove(QDir(selectedOutput).filePath(previousPrefix+".last-failed-report.json"));
+            }
+        }
     }
     void cleanMatchingLegacyScene() {
         if(mode=="animation")return;
@@ -142,6 +196,7 @@ class Studio : public QMainWindow {
             error="Could not update the export manifest.";return false;
         }
         cleanMatchingLegacyScene();
+        cleanPreviousPrefix();
         resultPath=QDir(selectedOutput).filePath(exportPrefix+".blend");
         bundlePath=QDir(selectedOutput).filePath(exportPrefix+"."+(mode=="animation"?"knight-animations.json":"scene.json"));
         append(QString("Updated %1 named export files in %2\n").arg(published.size()).arg(selectedOutput));
@@ -197,7 +252,10 @@ class Studio : public QMainWindow {
             auto path=it.next(); auto file=it.fileInfo();
             if(sky ? file.suffix().compare("dat",Qt::CaseInsensitive)!=0 :
                 (!file.suffix().isEmpty() && file.suffix().compare("dat",Qt::CaseInsensitive)!=0)) continue;
-            auto item=new QListWidgetItem(root.relativeFilePath(path),list);item->setData(Qt::UserRole,path);
+            QString label=root.relativeFilePath(path);
+            if(!sky){const SceneIdentity identity=identifyScene(path);
+                if(!identity.title.isEmpty())label=identity.title+" ["+identity.id+"] — "+label;}
+            auto item=new QListWidgetItem(label,list);item->setData(Qt::UserRole,path);
         }
         list->sortItems();
         status->setText(QString("%1 files found. Select a source to export.").arg(list->count()));
@@ -214,7 +272,12 @@ class Studio : public QMainWindow {
         auto choose=new QPushButton("Choose source file…");layout->addWidget(choose);
         connect(choose,&QPushButton::clicked,this,[=]{
             auto path=QFileDialog::getOpenFileName(this,"Select source",sky?QDir(game->text()).filePath("rsrc/world/skybox"):archive->text());
-            if(!path.isEmpty()){auto item=new QListWidgetItem(QFileInfo(path).fileName(),target);item->setData(Qt::UserRole,path);target->setCurrentItem(item);}
+            if(!path.isEmpty()){
+                QString label=QFileInfo(path).fileName();
+                if(!sky){const SceneIdentity identity=identifyScene(path);
+                    if(!identity.title.isEmpty())label=identity.title+" ["+identity.id+"] — "+label;}
+                auto item=new QListWidgetItem(label,target);item->setData(Qt::UserRole,path);target->setCurrentItem(item);
+            }
         });return page;
     }
 protected:
@@ -226,6 +289,7 @@ public:
     Studio() {
         QFile paths(QCoreApplication::applicationDirPath()+"/paths.json");
         if(paths.open(QIODevice::ReadOnly))defaults=QJsonDocument::fromJson(paths.readAll()).object();
+        loadSceneCatalog();
         setWindowTitle("ThreeRings Studio · " TRS_VERSION " · Preview");resize(1120,850);
         auto central=new QWidget;setCentralWidget(central);auto layout=new QVBoxLayout(central);
         auto title=new QLabel("ThreeRings Studio");title->setStyleSheet("font-size:25px;font-weight:600;");layout->addWidget(title);
@@ -282,10 +346,13 @@ public:
         QString destination=QFileInfo(output->text()).absoluteFilePath();
         if(!QDir().mkpath(destination)){fail("Cannot create the selected export folder.");return;}
         selectedOutput=destination;
-        exportPrefix=prefixFor(kind,source,game->text());
+        currentScene=kind=="scene"?identifyScene(source):SceneIdentity{};
+        previousPrefix=prefixFor(kind,source,game->text());
+        exportPrefix=prefixFor(kind,source,game->text(),currentScene.title);
         logFile.setFileName(QDir(destination).filePath(exportPrefix+".export.log"));
         if(!logFile.open(QIODevice::WriteOnly|QIODevice::Truncate)){fail("Cannot replace the export log in the selected folder.");return;}
         append("ThreeRings Studio " TRS_VERSION "\nLog: "+logFile.fileName()+"\nMode: "+kind+"\nSource: "+source+"\n");
+        if(!currentScene.title.isEmpty())append("Recognized scene: "+currentScene.title+" ["+currentScene.id+"] via "+currentScene.method+"\n");
         QFile identity(QCoreApplication::applicationDirPath()+"/build-identity.json");
         if(identity.open(QIODevice::ReadOnly))append(QString::fromUtf8(identity.readAll())+"\n");
         QString rsrc=QDir(game->text()).filePath("rsrc");
@@ -310,6 +377,10 @@ public:
         if(kind!="animation"&&!globals->text().isEmpty()){
             if(!QFileInfo(globals->text()).isFile()){fail("Legacy globals XML path does not exist. Select it or clear the field.");return;}
             args<<globals->text();
+        }
+        if(kind=="scene"){
+            if(globals->text().isEmpty())args<<"";
+            args<<currentScene.title<<currentScene.id<<currentScene.method;
         }
         pending.append({"Extract game data",javaPath,args});
         bundlePath=stagingPath+(kind=="animation"?"/knight-animations.json":"/scene.json");resultPath=stagingPath+"/"+(kind=="animation"?"Knight-Animations.blend":kind=="scene"?"Level.blend":"Skybox.blend");

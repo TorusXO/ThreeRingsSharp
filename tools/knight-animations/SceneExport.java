@@ -79,6 +79,7 @@ public final class SceneExport {
     static Object snapshot(Object value,int depth){
         if(value==null||value instanceof String||value instanceof Number||value instanceof Boolean)return value;
         if(value instanceof Enum)return value.toString();
+        if(refClass!=null&&refClass.isInstance(value))try{return map("name",name(value),"arguments",depth<3?snapshot(f(value,"_arguments"),depth+1):null);}catch(Exception e){return String.valueOf(value);}
         if(depth>3)return map("class",value.getClass().getName());
         if(value instanceof Map){Map<String,Object>r=new LinkedHashMap<>();
             for(Map.Entry<?,?>item:((Map<?,?>)value).entrySet())r.put(String.valueOf(item.getKey()),snapshot(item.getValue(),depth+1));
@@ -353,8 +354,9 @@ public final class SceneExport {
         }finally{stack.remove(key);}
     }
     public static void main(String[]args)throws Exception {
-        if(args.length<3||args.length>4)throw new IllegalArgumentException("Usage: SceneExport <rsrc> <scene-file> <new-output-dir> [legacy-scene-global.xml]");
-        if(args.length==4)legacyGlobals=Paths.get(args[3]);
+        if(args.length<3||args.length>7)throw new IllegalArgumentException("Usage: SceneExport <rsrc> <scene-file> <new-output-dir> [legacy-scene-global.xml] [display-name scene-id match-method]");
+        if(args.length>=4&&!args[3].isEmpty())legacyGlobals=Paths.get(args[3]);
+        String displayName=args.length>=5?args[4]:"",sceneId=args.length>=6?args[5]:"",nameSource=args.length>=7?args[6]:"";
         Path rsrc=Paths.get(args[0]).toAbsolutePath(),scenePath=Paths.get(args[1]).toAbsolutePath(),out=Paths.get(args[2]).toAbsolutePath();
         if(Files.exists(out))throw new IOException("Use a new output directory: "+out);
         output=out;
@@ -374,6 +376,8 @@ public final class SceneExport {
             System.out.println("Model export: "+meshes.size()+" meshes, "+instances.size()+" instances.");return;
         }
         scene.getClass().getMethod("init",cm).invoke(scene,root);manager=call(scene,"getConfigManager");
+        String internalName=String.valueOf(f(scene,"name"));
+        if(displayName.isEmpty())displayName=scenePath.getFileName().toString().replaceFirst("(?i)\\.dat$","");
         Collection<?>entries=(Collection<?>)call(scene,"adH");int entryId=0,visualEntries=0,emptyEntries=0;
         for(Object entry:entries){
             String kind=entry.getClass().getSimpleName();kinds.merge(kind,1,Integer::sum);int id=entryId++;
@@ -382,12 +386,16 @@ public final class SceneExport {
                 if(kind.equals("GlobalEntry")){
                     Object original=entry.getClass().getMethod("az",cm).invoke(entry,manager);
                     LegacyAlias alias=legacyAliases.get(name(reference));
-                    if(original==Class.forName("com.threerings.tudey.config.SceneGlobalConfig").getField("bSl").get(null))original=resolveGlobal(manager,reference,new LinkedHashSet<>());
-                    metadata.add(map("id",id,"type",kind,"reference",String.valueOf(reference),"configuration",snapshot(original,0),"legacyAlias",alias==null?null:map("target",alias.target,"targetReference",String.valueOf(alias.targetReference),"selectedArguments",snapshot(f(reference,"_arguments"),0),"definitionXml",alias.definition)));
-                    Object model=opt(original,"model");
+                    Map<?,?> selected=(Map<?,?>)f(reference,"_arguments");
+                    Object parameterModel=selected.get("Model");
+                    boolean directModel=original==Class.forName("com.threerings.tudey.config.SceneGlobalConfig").getField("bSl").get(null)
+                        &&name(reference).equals("Environment/Model")&&refClass.isInstance(parameterModel);
+                    if(!directModel&&original==Class.forName("com.threerings.tudey.config.SceneGlobalConfig").getField("bSl").get(null))original=resolveGlobal(manager,reference,new LinkedHashSet<>());
+                    Object model=directModel?parameterModel:opt(original,"model");
+                    metadata.add(map("id",id,"type",kind,"reference",String.valueOf(reference),"configuration",directModel?map("kind","parameterized environment model","model",String.valueOf(model)):snapshot(original,0),"selectedArguments",snapshot(selected,0),"legacyAlias",alias==null?null:map("target",alias.target,"targetReference",String.valueOf(alias.targetReference),"definitionXml",alias.definition)));
                     if(model!=null)for(Map<String,Object>part:asset(model,manager,new HashSet<>())){
                         Map<String,Object>placed=transformed(part,matrix(opt(original,"transform")));
-                        instances.add(map("entry",id,"type",kind,"model",name(model),"reference",String.valueOf(reference),"mesh",part.get("mesh"),"matrix",placed.get("matrix"),"skybox",part.get("skybox"),"configuration",part.get("configuration")));
+                        instances.add(map("entry",id,"type",kind,"model",name(model),"reference",String.valueOf(reference),"mesh",part.get("mesh"),"matrix",placed.get("matrix"),"skybox",Boolean.TRUE.equals(part.get("skybox"))||name(model).startsWith("world/skybox/"),"configuration",part.get("configuration")));
                     }
                     continue;
                 }
@@ -413,8 +421,8 @@ public final class SceneExport {
             if(id%2000==0)System.out.println("Read "+id+" / "+entries.size()+" entries");
         }
         Files.createDirectories(out);
-        Files.writeString(out.resolve("scene.json"),KnightAnimationExport.json(map("format","trs-scene-1","name",f(scene,"name"),"source",scenePath.toString(),"resourceDirectory",rsrc.toString(),"meshes",meshes,"materials",materials,"instances",instances,"placements",placements,"metadata",metadata)));
-        Files.writeString(out.resolve("scene-report.json"),KnightAnimationExport.json(map("entryCount",entries.size(),"entryKinds",kinds,"visualEntries",visualEntries,"emptyEntries",emptyEntries,"meshCount",meshes.size(),"instanceCount",instances.size(),"modelKinds",modelKinds,"issues",issues)));
+        Files.writeString(out.resolve("scene.json"),KnightAnimationExport.json(map("format","trs-scene-1","name",displayName,"internalName",internalName,"sceneId",sceneId,"nameSource",nameSource,"source",scenePath.toString(),"resourceDirectory",rsrc.toString(),"meshes",meshes,"materials",materials,"instances",instances,"placements",placements,"metadata",metadata)));
+        Files.writeString(out.resolve("scene-report.json"),KnightAnimationExport.json(map("name",displayName,"internalName",internalName,"sceneId",sceneId,"nameSource",nameSource,"source",scenePath.toString(),"entryCount",entries.size(),"entryKinds",kinds,"visualEntries",visualEntries,"emptyEntries",emptyEntries,"meshCount",meshes.size(),"instanceCount",instances.size(),"modelKinds",modelKinds,"issues",issues)));
         System.out.println("Scene export: "+meshes.size()+" mesh definitions, "+instances.size()+" instances, "+issues.size()+" issues.");
         if(errors>0)throw new IOException("Export contains "+errors+" unresolved errors; see scene-report.json");
     }

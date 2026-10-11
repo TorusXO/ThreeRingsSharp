@@ -9,11 +9,13 @@ Keep the deployed application folder together, including Qt DLLs, `platforms/` a
 Set the game installation and a **Blender 4.2 LTS** executable. Leave Java blank to use the installed game runtime. If an upgraded runtime contains obsolete Java 8 `lib/ext` files, the app copies the runtime into its own cache excluding those files; the game installation is never modified. A compatible Java executable can also be selected explicitly.
 
 - **Knight animations:** exports all supported stored clips as Actions. Anatomical UE names are enabled by default, checked against the supplied reference rig. This preserves the 49-node SK hierarchy; it does not retarget onto the reference's 88-bone skeleton. Optional FBX export has a known weapon-helper discrepancy; use the `.blend` as the authoritative result.
-- **Levels:** choose an SKSA archive directory, scan/filter it, select a scene, then export. Extensionless scene files and `.dat` files are listed; a non-scene file is rejected by the backend. Haven Town Square is validated.
+- **Levels:** choose an SKSA archive directory, scan/filter it, select a scene, then export. Extensionless scene files and `.dat` files are listed; a non-scene file is rejected by the backend. The level list identifies numeric files and exact content matches against the supplied 205-name scene catalog. The Blender collection, reports and output filename use the recognized name; JSON also retains the scene's internal name, original path, catalog ID and match method. Unmatched scenes retain their source filename. The catalog is user-supplied archive data and may contain historical names or uncertainty notes.
 - **Skyboxes:** scan the game's skybox directory or choose a wrapper/model `.dat`. Skybox geometry uses unlit materials, independent transforms, and recorded camera-parallax settings. Parallax scale is never applied as mesh scale.
 - **Optional color node:** select the user's `Color_Replacement_Node.blend` to append `ColorReplacementNode` as a local editable group. It is available through the Shader Editor's Add → Group menu. The default materials already use native game recoloring; the optional group is not automatically inserted into their links.
 
 Choose one output folder for any number of exports. Each level or skybox uses its source name plus a short path hash in every filename; knight animations have their own prefix. JSON data, reports, logs, FBX files, generated recolored textures and packed `.blend` files all live directly in that folder. Re-exporting the same source replaces its named files and log, while exports from other sources and unrelated files remain. Recolored PNGs use content hashes so identical textures can be reused. A temporary staging folder is removed after each run. If an export fails, its previous completed `.blend` remains available and its named log and `last-failed-report.json` explain the failure.
+
+When a recognized name changes a source's prefix, a successful export removes that same source's older generic prefix files. The two catalog TSV files in `backend/` are needed for scene identification. They contain only names and hashes from the user's archived scene copies, not game assets.
 
 The level importer uses linked mesh datablocks for identical geometry/UVs/normals/vertex colors. Materials are linked to objects so differently colored instances can share geometry. Textures are deduplicated by decoded pixel content plus color-space interpretation, including differently encoded files. The validation report includes unique mesh/image counts and placement checks.
 
@@ -25,6 +27,8 @@ The current installation lacks `rsrc/config/placeable.dat`. If present, the exis
 
 Old scene-global binary configs use a wrapper class that is abstract in current game jars. The shipped legacy XML (already present in the original repository) is migrated **in memory**, preserving model references and parameters. Select a different globals XML for another archive version if needed, or clear it to use the game binary config.
 
+Some archived scenes use a parameter-only `Environment/Model` global with a model argument and no default implementation. The native adapter exports that supplied model, including skybox geometry, while retaining the reference and selected arguments in JSON.
+
 Static geometry, native recoloring, vertex colors, alpha/additive materials and skybox geometry are implemented. Particle systems, procedural effects, GUI billboards, animated texture scrolling/atlases, engine fog, light sets, projected shadows and camera-follow behavior are not a complete Blender recreation of the game renderer. Unsupported runtime features remain named metadata objects and are reported as limitations. Resolution/geometry/material errors stop the pipeline. The game-specific shader conversions are approximations, not a pixel-identical renderer.
 
 ## Build and validate
@@ -32,7 +36,7 @@ Static geometry, native recoloring, vertex colors, alpha/additive materials and 
 `build.ps1` defaults to the installed Qt 6.11.2 MinGW kit, CMake, Ninja and JDK 21. It builds C++ Release, compiles the extension to Java 11 bytecode, deploys Qt and packages Python scripts and compatibility XML. The Java **runtime** must still support the installed game jars (Java 25 for the tested installation).
 
 ```powershell
-./qt/build.ps1 -Destination ./releases/ThreeRingsStudio-0.2.1-preview
+./qt/build.ps1 -Destination ./releases/ThreeRingsStudio-0.2.2-preview
 ```
 
 Override paths with `-QtDirectory`, `-QtToolsDirectory`, `-JdkDirectory`, `-BuildDirectory`, `-Destination`. Deployment writes `build-identity.json` with executable/backend hashes and source/build identity. Qt is dynamically linked; deployed license texts remain alongside the executable. The build does not compile or alter the legacy C# applications.

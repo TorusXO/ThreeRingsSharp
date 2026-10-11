@@ -24,13 +24,14 @@ Copy-Item -LiteralPath "$build/ThreeRingsStudio.exe" -Destination $dest
 Get-ChildItem -LiteralPath "$repo/tools/knight-animations" -Filter '*.py' | Copy-Item -Destination "$dest/backend"
 # This compatibility config is already part of the original repository.
 Copy-Item -LiteralPath "$repo/ThreeRingsSharp/ConfigRefs/scene_global.xml" -Destination "$dest/backend"
+Copy-Item -LiteralPath "$PSScriptRoot/scene-names.tsv", "$PSScriptRoot/scene-fingerprints.tsv" -Destination "$dest/backend"
 & "$QtDirectory/bin/windeployqt.exe" --release --no-translations --no-opengl-sw --compiler-runtime "$dest/ThreeRingsStudio.exe"
 if ($LASTEXITCODE) { throw 'Qt deployment failed' }
 Copy-Item -LiteralPath "$repo/LICENSE" -Destination "$dest/LICENSE-ThreeRingsSharp.txt"
 Copy-Item -LiteralPath "$PSScriptRoot/README.md" -Destination "$dest/README.md"
 if (Test-Path "$QtDirectory/../../Licenses") { Copy-Item "$QtDirectory/../../Licenses" "$dest/Qt-Licenses" -Recurse -Force }
 $identity = [ordered]@{
-    version = '0.2.1-preview'; profile = 'Release / Qt 6 / MinGW x64'; builtUtc = [DateTime]::UtcNow.ToString('o')
+    version = '0.2.2-preview'; profile = 'Release / Qt 6 / MinGW x64'; builtUtc = [DateTime]::UtcNow.ToString('o')
     qtVersion = (& "$QtDirectory/bin/qmake.exe" -query QT_VERSION)
     commit = (& git -C $repo rev-parse HEAD); sourceDirty = [bool](& git -C $repo status --porcelain)
     executableSha256 = (Get-FileHash "$dest/ThreeRingsStudio.exe" -Algorithm SHA256).Hash
