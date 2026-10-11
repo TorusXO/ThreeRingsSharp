@@ -19,6 +19,8 @@ When a recognized name changes a source's prefix, a successful export removes th
 
 The level importer uses linked mesh datablocks for identical geometry/UVs/normals/vertex colors. Materials are linked to objects so differently colored instances can share geometry. Textures are deduplicated by decoded pixel content plus color-space interpretation, including differently encoded files. The exporter follows nested material references to resolve diffuse images, including materials whose mesh labels use legacy `.psd` names. The validation report includes unique mesh/image counts, placement checks, and visible materials without resolved textures.
 
+The exporter also follows inherited material references for masked, translucent and additive surface modes. Masked materials use their source alpha threshold, so transparent wall-panel cutouts show through in Blender. The validation report lists any visible material with an alpha-bearing image that still resolves as opaque. Stored development meshes, including monster spawn and wave markers, appear in the **Editor markers** collection, which is hidden from renders and can be hidden in the viewport. Other runtime-only definitions stay in **Runtime metadata** as hidden named objects; their full game behavior is not recreated.
+
 ## Compatibility and scope
 
 The native extension resolves configs using the locally installed game jars, without redistributing them. Reflection entrypoints currently target the tested installed game; an upstream obfuscation change can require adapting the adapter. No game assets or runtime are included in Git.
@@ -40,7 +42,7 @@ Static geometry, native recoloring, vertex colors, alpha/additive materials and 
 `build.ps1` defaults to the installed Qt 6.11.2 MinGW kit, CMake, Ninja and JDK 21. It builds C++ Release, compiles the extension to Java 11 bytecode, deploys Qt and packages Python scripts and compatibility XML. The Java **runtime** must still support the installed game jars (Java 25 for the tested installation).
 
 ```powershell
-./qt/build.ps1 -Destination ./releases/ThreeRingsStudio-0.2.4-preview
+./qt/build.ps1 -Destination ./releases/ThreeRingsStudio-0.2.5-preview
 ```
 
 Override paths with `-QtDirectory`, `-QtToolsDirectory`, `-JdkDirectory`, `-BuildDirectory`, `-Destination`. Deployment writes `build-identity.json` with executable/backend hashes and source/build identity. Qt is dynamically linked; deployed license texts remain alongside the executable. The build does not compile or alter the legacy C# applications.

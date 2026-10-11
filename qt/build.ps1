@@ -31,7 +31,7 @@ Copy-Item -LiteralPath "$repo/LICENSE" -Destination "$dest/LICENSE-ThreeRingsSha
 Copy-Item -LiteralPath "$PSScriptRoot/README.md" -Destination "$dest/README.md"
 if (Test-Path "$QtDirectory/../../Licenses") { Copy-Item "$QtDirectory/../../Licenses" "$dest/Qt-Licenses" -Recurse -Force }
 $identity = [ordered]@{
-    version = '0.2.4-preview'; profile = 'Release / Qt 6 / MinGW x64'; builtUtc = [DateTime]::UtcNow.ToString('o')
+    version = '0.2.5-preview'; profile = 'Release / Qt 6 / MinGW x64'; builtUtc = [DateTime]::UtcNow.ToString('o')
     qtVersion = (& "$QtDirectory/bin/qmake.exe" -query QT_VERSION)
     commit = (& git -C $repo rev-parse HEAD); sourceDirty = [bool](& git -C $repo status --porcelain)
     executableSha256 = (Get-FileHash "$dest/ThreeRingsStudio.exe" -Algorithm SHA256).Hash

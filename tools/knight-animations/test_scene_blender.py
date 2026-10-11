@@ -14,13 +14,14 @@ from import_scene_blender import import_scene
 
 with tempfile.TemporaryDirectory(prefix="trs-scene-test-") as directory:
     root = Path(directory)
-    image = bpy.data.images.new("fixture", width=2, height=2)
-    image.pixels[:] = [0.25, 0.5, 0.75, 1.0] * 4
-    image.filepath_raw = str(root / "first.png")
-    image.file_format = "PNG"
-    image.save()
-    bpy.data.images.remove(image)
-    png = (root / "first.png").read_bytes()
+    def png_chunk(kind, payload):
+        body = kind + payload
+        return struct.pack(">I", len(payload)) + body + struct.pack(">I", zlib.crc32(body))
+    pixels = bytes([64, 128, 191, 0] + [64, 128, 191, 255] * 3)
+    rows = b"\0" + pixels[:8] + b"\0" + pixels[8:]
+    png = (b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 6, 0, 0, 0))
+           + png_chunk(b"IDAT", zlib.compress(rows)) + png_chunk(b"IEND", b""))
+    (root / "first.png").write_bytes(png)
     # Same pixels, different bytes: an ancillary PNG text chunk changes the hash.
     payload = b"Source\0second file"
     chunk = b"tEXt" + payload
@@ -38,8 +39,12 @@ with tempfile.TemporaryDirectory(prefix="trs-scene-test-") as directory:
         transform = copy.deepcopy(identity)
         transform[0][3] = i*2
         instances.append(dict(entry=i, type="PlaceableEntry", model="fixture", reference="fixture", mesh=i, matrix=transform))
+    instances.append(dict(entry=4, type="PlaceableEntry", model="editor/marker/monster_wave/model.dat",
+                          reference="fixture", mesh=0, matrix=identity, editorOnly=True))
+    instances.append(dict(entry=5, type="PlaceableEntry", model="editor/marker/monster_wave/model.dat",
+                          reference="fixture", mesh=None, matrix=identity, editorOnly=True, kind="wave"))
     data = dict(format="trs-scene-1", name="Regression fixture", resourceDirectory=str(root),
-                materials={"a":dict(name="a",textures=["first.png"],parameters={}),
+                materials={"a":dict(name="a",textures=["first.png"],parameters={},alphaMode="MASKED",alphaThreshold=0.92),
                            "b":dict(name="b",textures=["second.png"],parameters={"Color State Override":[0.5,1,1,1]})},
                 meshes=meshes, instances=instances, metadata=[])
     path = root / "scene.json"
@@ -49,10 +54,22 @@ with tempfile.TemporaryDirectory(prefix="trs-scene-test-") as directory:
     assert objects[0].data == objects[1].data, "Identical geometry with different materials must share a mesh"
     assert objects[0].material_slots[0].material != objects[1].material_slots[0].material
     assert len({o.data.as_pointer() for o in objects}) == 3, "UV and vertex-color differences must stay independent"
-    assert [round(o.location.x) for o in objects] == [0, 2, 4, 6]
+    assert [round(o.location.x) for o in objects] == [0, 2, 4, 6, 0]
     images = [next(n.image for n in o.material_slots[0].material.node_tree.nodes if n.type == "TEX_IMAGE") for o in objects]
     assert all(image == images[0] for image in images), "Identical pixels in differently encoded files must share an image"
     assert images[0].packed_file is not None
+    masked = objects[0].material_slots[0].material
+    alpha_link = masked.node_tree.nodes["Principled BSDF"].inputs["Alpha"].links[0]
+    assert alpha_link.from_node.operation == "GREATER_THAN"
+    assert abs(alpha_link.from_node.inputs[1].default_value - 0.92) < 1e-6
+    assert masked.surface_render_method == "DITHERED"
+    markers = next(c for c in collection.children if c.name == "Editor markers")
+    assert not markers.hide_viewport and markers.hide_render
+    assert objects[4].name in markers.objects
+    assert len(markers.objects) == 2 and any(o.type == "EMPTY" for o in markers.objects)
     report = json.loads((root / "blender-scene-validation.json").read_text())
     assert report["unique_meshes"] == 3 and report["unique_texture_images"] == 1
-print("TRS_SCENE_REGRESSION: PASS — material overrides, transforms, UV/color isolation, pixel-content image reuse")
+    assert report["editor_marker_instances"] == 2 and report["editor_markers_visible"]
+    assert report["editor_marker_mesh_instances"] == 1 and report["editor_marker_location_instances"] == 1
+    assert report["alpha_bearing_opaque_materials"][0]["name"] == "b", (report["alpha_bearing_opaque_materials"], list(images[0].pixels))
+print("TRS_SCENE_REGRESSION: PASS — material/alpha, visible markers, transforms, UV/color isolation, image reuse")

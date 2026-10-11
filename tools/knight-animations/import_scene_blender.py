@@ -27,7 +27,6 @@ def import_scene(path):
         root.children.link(group)
         groups[name] = group
     groups["Editor markers"].hide_render = True
-    groups["Editor markers"].hide_viewport = True
     groups["Runtime metadata"].hide_render = True
     groups["Runtime metadata"].hide_viewport = True
     resources = Path(data["resourceDirectory"])
@@ -35,11 +34,16 @@ def import_scene(path):
     materials = {}
     image_cache = {}
     image_file_cache = {}
+    image_has_alpha = {}
+    opaque_alpha_materials = set()
     for key, source in data["materials"].items():
         material = bpy.data.materials.new(source["name"] or "Untextured")
         material.use_nodes = True
         material["trs_reference"] = source.get("reference") or ""
         material["trs_parameters"] = json.dumps(source.get("parameters", {}))
+        alpha_mode = source.get("alphaMode") or next((mode for word, mode in (("Masked", "MASKED"), ("Translucent", "TRANSLUCENT"), ("Additive", "ADDITIVE")) if word in key), "OPAQUE")
+        material["trs_alpha_mode"] = alpha_mode
+        material["trs_alpha_threshold"] = source.get("alphaThreshold", 0.5)
         nodes, links = material.node_tree.nodes, material.node_tree.links
         bsdf = nodes.get("Principled BSDF")
         bsdf.inputs["Roughness"].default_value = 1
@@ -60,6 +64,7 @@ def import_scene(path):
                     image.colorspace_settings.name = "sRGB"
                     pixels = array("f", [0]) * len(image.pixels)
                     image.pixels.foreach_get(pixels)
+                    contains_alpha = image.channels == 4 and any(value < 0.999 for value in pixels[3::4])
                     pixel_key = (tuple(image.size), image.channels, "sRGB", hashlib.sha256(pixels.tobytes()).hexdigest())
                     existing = image_cache.get(pixel_key)
                     if existing is not None and existing != image:
@@ -68,6 +73,9 @@ def import_scene(path):
                         image = existing
                     image_cache[pixel_key] = image
                     image_file_cache[image_key] = image
+                    image_has_alpha[image.as_pointer()] = contains_alpha
+                if alpha_mode == "OPAQUE" and image_has_alpha.get(image.as_pointer(), False):
+                    opaque_alpha_materials.add(key)
                 if image.packed_file is None:
                     image.pack()
                 tex = nodes.new("ShaderNodeTexImage")
@@ -84,9 +92,6 @@ def import_scene(path):
                     scale.inputs[1].default_value = (1/(2**params.get("Divisions S", 0)), 1/(2**params.get("Divisions T", 0)), 1)
                     links.new(uv.outputs["UV"], scale.inputs[0])
                     links.new(scale.outputs[0], tex.inputs["Vector"])
-                if any(word in key for word in ("Masked", "Translucent", "Additive")):
-                    links.new(tex.outputs["Alpha"], bsdf.inputs["Alpha"])
-                    material.surface_render_method = "DITHERED"
             else:
                 missing_images.append(str(image_path))
         tint = params.get("Color State Override", [1, 1, 1, 1])
@@ -117,9 +122,17 @@ def import_scene(path):
             links.new(alpha_output, texture_alpha.inputs[0])
             links.new(alpha.outputs[0], texture_alpha.inputs[1])
             alpha = texture_alpha
-        if any(word in key for word in ("Masked", "Translucent", "Additive")):
+        if alpha_mode == "MASKED":
+            cutoff = nodes.new("ShaderNodeMath")
+            cutoff.operation = "GREATER_THAN"
+            cutoff.inputs[1].default_value = float(source.get("alphaThreshold", 0.5))
+            links.new(alpha.outputs[0], cutoff.inputs[0])
+            links.new(cutoff.outputs[0], bsdf.inputs["Alpha"])
+            material.surface_render_method = "DITHERED"
+        elif alpha_mode == "TRANSLUCENT":
             links.new(alpha.outputs[0], bsdf.inputs["Alpha"])
-        if "Additive" in key:
+            material.surface_render_method = "DITHERED"
+        if alpha_mode == "ADDITIVE":
             # Additive meshes (sunbeams, glows) must not become opaque black cones.
             emission = nodes.new("ShaderNodeEmission")
             links.new(color_output, emission.inputs["Color"])
@@ -201,22 +214,24 @@ def import_scene(path):
         mesh_id = instance["mesh"]
         obj = bpy.data.objects.new(f"{instance['entry']}: {Path(instance.get('detail') or instance['model']).stem}", meshes[mesh_id] if mesh_id is not None else None)
         if mesh_id is None:
-            obj.empty_display_type = "PLAIN_AXES"
-            obj.empty_display_size = 0.2
-            group = groups["Runtime metadata"]
+            obj.empty_display_type = "SPHERE" if instance.get("editorOnly") else "PLAIN_AXES"
+            obj.empty_display_size = 0.5 if instance.get("editorOnly") else 0.2
+            group = groups["Editor markers"] if instance.get("editorOnly") else groups["Runtime metadata"]
             obj["trs_runtime_kind"] = instance.get("kind") or ""
             obj["trs_configuration"] = json.dumps(instance.get("configuration"))
         else:
             obj.material_slots[0].link = "OBJECT"
             obj.material_slots[0].material = materials[data["meshes"][mesh_id]["material"]]
             group = groups["Skyboxes"] if instance.get("skybox") else groups["Editor markers"] if instance.get("editorOnly") else groups["Tiles"] if instance["type"] == "TileEntry" else groups["Props"]
+        if instance.get("editorOnly"):
+            obj["trs_editor_marker"] = True
         if instance.get("skybox"):
             obj["trs_skybox"] = True
             obj["trs_camera_parallax"] = json.dumps(instance.get("configuration"))
             if mesh_id is not None:
                 obj.visible_shadow = False
                 key = data["meshes"][mesh_id]["material"]
-                if "Additive" not in key:
+                if (data["materials"][key].get("alphaMode") or ("ADDITIVE" if "Additive" in key else "OPAQUE")) != "ADDITIVE":
                     if key not in sky_materials:
                         material = materials[key].copy()
                         material.name += " · Sky unlit"
@@ -272,7 +287,7 @@ def import_scene(path):
         for key, uses in sorted(visible_material_uses.items())
         if not data["materials"][key]["textures"]
     ]
-    visible = [o for o in objects if o.type == "MESH" and not o.get("trs_skybox") and not any(c.hide_viewport for c in o.users_collection)]
+    visible = [o for o in objects if o.type == "MESH" and not o.get("trs_skybox") and not o.get("trs_editor_marker") and not any(c.hide_viewport for c in o.users_collection)]
     points = [o.matrix_world @ Vector(p) for o in visible for p in o.bound_box]
     if points:
         lo = Vector([min(p[i] for p in points) for i in range(3)])
@@ -286,13 +301,23 @@ def import_scene(path):
     root["trs_bundle"] = str(path)
     root["trs_max_matrix_error"] = max_error
     root["trs_entry_metadata"] = json.dumps(data["metadata"])
+    root["trs_editor_marker_instances"] = sum(bool(o.get("trs_editor_marker")) for o in objects)
+    alpha_bearing_opaque_materials = [
+        {"name": data["materials"][key]["name"], "reference": data["materials"][key].get("reference"), "mesh_instances": uses}
+        for key, uses in sorted(visible_material_uses.items()) if key in opaque_alpha_materials
+    ]
     report = dict(mesh_definitions=len(meshes), unique_meshes=len(mesh_cache), reused_mesh_definitions=len(meshes)-len(mesh_cache), unique_texture_images=len(image_cache), mesh_instances=sum(o.type == "MESH" for o in objects),
                   source_placement_checks=placement_checks, maximum_source_placement_error=placement_error,
                   runtime_instances=sum(o.type == "EMPTY" for o in objects), materials=len(materials),
                   packed_images=sum(image.packed_file is not None for image in bpy.data.images),
                   redundant_or_degenerate_faces_removed=redundant_faces,
                   maximum_transform_error=max_error, missing_images=missing_images,
-                  untextured_visible_materials=untextured_visible_materials)
+                  untextured_visible_materials=untextured_visible_materials,
+                  editor_marker_instances=root["trs_editor_marker_instances"],
+                  editor_marker_mesh_instances=sum(o.type == "MESH" and bool(o.get("trs_editor_marker")) for o in objects),
+                  editor_marker_location_instances=sum(o.type == "EMPTY" and bool(o.get("trs_editor_marker")) for o in objects),
+                  editor_markers_visible=not groups["Editor markers"].hide_viewport,
+                  alpha_bearing_opaque_materials=alpha_bearing_opaque_materials)
     (path.parent / "blender-scene-validation.json").write_text(json.dumps(report, indent=2))
     print("TRS_SCENE_IMPORT:", report)
     return root

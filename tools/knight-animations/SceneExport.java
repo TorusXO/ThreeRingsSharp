@@ -227,6 +227,28 @@ public final class SceneExport {
             textureFiles(child,files,visited,depth+1,mgr);
         }
     }
+    static Map<String,Object> materialSurface(Object reference,Object mgr)throws Exception {
+        String mode="OPAQUE", resolved=null;
+        double threshold=0.5;
+        Set<String> visited=new HashSet<>();
+        Class<?> materialType=Class.forName("com.threerings.opengl.material.config.MaterialConfig");
+        for(Object current=reference;current!=null;){
+            String referenceName=name(current);
+            if(!visited.add(referenceName))throw new IOException("Cyclic material inheritance: "+referenceName);
+            Map<?,?> args=(Map<?,?>)f(current,"_arguments");
+            Object value=args.get("Alpha Threshold");
+            if(value instanceof Number)threshold=((Number)value).doubleValue();
+            if(referenceName.contains("Masked"))mode="MASKED";
+            else if(referenceName.contains("Translucent"))mode="TRANSLUCENT";
+            else if(referenceName.contains("Additive"))mode="ADDITIVE";
+            else if(referenceName.contains("Opaque"))mode="OPAQUE";
+            Object config=resolve(mgr,materialType,current);
+            Object next=opt(opt(config,"implementation"),"material");
+            if(next==null){resolved=referenceName;break;}
+            current=next;
+        }
+        return map("alphaMode",mode,"alphaThreshold",threshold,"resolvedMaterial",resolved);
+    }
     static String material(Object impl,Object mesh,Object mgr,String source)throws Exception {
         String texture=String.valueOf(f(mesh,"texture")),tag=String.valueOf(f(mesh,"tag"));
         Object ref=null;
@@ -236,7 +258,11 @@ public final class SceneExport {
         String key=ref==null?source+"|"+texture:ref.toString();
         if(materials.containsKey(key))return key;
         Set<String> files=new LinkedHashSet<>();
-        if(ref!=null)try{textureFiles(resolve(mgr,Class.forName("com.threerings.opengl.material.config.MaterialConfig"),ref),files,Collections.newSetFromMap(new IdentityHashMap<>()),0,mgr);}
+        Map<String,Object> surface=map("alphaMode","OPAQUE","alphaThreshold",0.5,"resolvedMaterial",null);
+        if(ref!=null)try{
+            textureFiles(resolve(mgr,Class.forName("com.threerings.opengl.material.config.MaterialConfig"),ref),files,Collections.newSetFromMap(new IdentityHashMap<>()),0,mgr);
+            surface=materialSurface(ref,mgr);
+        }
         catch(Exception e){issue(source+" material "+key,cause(e).toString());}
         if(files.isEmpty()){
             Path relative=Paths.get(source).getParent();
@@ -248,7 +274,9 @@ public final class SceneExport {
             Object v=arg.getValue();if(v instanceof String||v instanceof Number||v instanceof Boolean)parameters.put(arg.getKey().toString(),v);
             else if(v!=null&&v.getClass().getName().equals("com.threerings.opengl.renderer.Color4f"))parameters.put(arg.getKey().toString(),new Object[]{f(v,"r"),f(v,"g"),f(v,"b"),f(v,"a")});
         }
-        materials.put(key,map("name",texture,"reference",ref==null?null:ref.toString(),"textures",files,"parameters",parameters));
+        Map<String,Object> record=map("name",texture,"reference",ref==null?null:ref.toString(),"textures",files,"parameters",parameters);
+        record.putAll(surface);
+        materials.put(key,record);
         return key;
     }
     static int mesh(Object visible,Object impl,Object mgr,String source)throws Exception {
