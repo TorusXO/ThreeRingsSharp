@@ -1,6 +1,10 @@
 #include <QtWidgets>
 #include <QProcess>
 #include <QSaveFile>
+#include <QCryptographicHash>
+#include <QRegularExpression>
+#include <QUuid>
+#include <algorithm>
 #include <functional>
 
 struct Step { QString title, program; QStringList arguments; int maximumExit = 0; };
@@ -20,7 +24,7 @@ class Studio : public QMainWindow {
     QList<Step> pending;
     Step active;
     QFile logFile;
-    QString resultPath, bundlePath, mode;
+    QString resultPath, bundlePath, mode, selectedOutput, stagingPath, exportPrefix, currentSource;
     bool batch = false, busy = false, cancelled = false;
     QSettings settings;
     QJsonObject defaults;
@@ -37,7 +41,6 @@ class Studio : public QMainWindow {
             QString selected = directory ? QFileDialog::getExistingDirectory(this,title,edit->text())
                 : QFileDialog::getOpenFileName(this,title,edit->text());
             if(!selected.isEmpty()) {
-                if(key=="output")selected=QDir(selected).filePath("TRS-Export-"+QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss"));
                 edit->setText(QDir::toNativeSeparators(selected));
                 settings.setValue(key,edit->text());
             }
@@ -50,16 +53,117 @@ class Studio : public QMainWindow {
         log->ensureCursorVisible();
         if(logFile.isOpen()){logFile.write(text.toUtf8()); logFile.flush();}
     }
+    static bool replaceFile(const QString &source,const QString &destination,QString &error) {
+        QFile input(source);
+        if(!input.open(QIODevice::ReadOnly)){error="Cannot read "+source+": "+input.errorString();return false;}
+        if(!QDir().mkpath(QFileInfo(destination).absolutePath())){error="Cannot create output directory for "+destination;return false;}
+        QSaveFile output(destination);
+        if(!output.open(QIODevice::WriteOnly)){error="Cannot replace "+destination+": "+output.errorString();return false;}
+        while(!input.atEnd()){
+            QByteArray chunk=input.read(1024*1024);
+            if(chunk.isEmpty()||output.write(chunk)!=chunk.size()){
+                output.cancelWriting();error="Copy failed for "+destination;return false;
+            }
+        }
+        if(!output.commit()){error="Could not finish replacing "+destination+": "+output.errorString();return false;}
+        return true;
+    }
+    void clearStage() {
+        if(stagingPath.isEmpty())return;
+        // The stage is an app-generated UUID child of the selected export folder.
+        const QString parent=QFileInfo(stagingPath).absoluteDir().canonicalPath();
+        if(parent==QDir(selectedOutput).canonicalPath() && QFileInfo(stagingPath).fileName().startsWith(".trs-stage-"))
+            QDir(stagingPath).removeRecursively();
+        stagingPath.clear();
+    }
+    static QString prefixFor(const QString &kind,const QString &source,const QString &gamePath) {
+        const QString identity=kind=="animation"?QFileInfo(gamePath).absoluteFilePath():QFileInfo(source).absoluteFilePath();
+        QString slug=kind=="animation"?"knight-animations":QFileInfo(source).completeBaseName().toLower();
+        if(kind=="skybox")slug=QFileInfo(source).dir().dirName().toLower()+"-"+slug;
+        slug.replace(QRegularExpression("[^a-z0-9]+"),"-");
+        slug=slug.left(48);while(slug.endsWith('-'))slug.chop(1);
+        if(slug.isEmpty())slug="source";
+        const QString hash=QString::fromLatin1(QCryptographicHash::hash(identity.toUtf8(),QCryptographicHash::Sha256).toHex().left(10));
+        return kind+"-"+slug+"-"+hash;
+    }
+    QString publishedName(const QString &relative) const {
+        const QString file=QFileInfo(relative).fileName();
+        if(file.startsWith("trs-texture-") && file.endsWith(".png"))return file;
+        if(file.endsWith(".blend",Qt::CaseInsensitive))return exportPrefix+".blend";
+        if(relative.startsWith("fbx/"))return exportPrefix+"."+file;
+        return exportPrefix+"."+file;
+    }
+    void cleanMatchingLegacyScene() {
+        if(mode=="animation")return;
+        QFile oldBundle(QDir(selectedOutput).filePath("scene.json"));
+        if(!oldBundle.open(QIODevice::ReadOnly))return;
+        const QString source=QJsonDocument::fromJson(oldBundle.readAll()).object().value("source").toString();
+        oldBundle.close();
+        auto normalized=[](QString path){return QDir::cleanPath(path.replace('\\','/'));};
+        if(source.isEmpty() || normalized(source).compare(normalized(currentSource),Qt::CaseInsensitive)!=0)return;
+        for(const QString &file:{"scene.json","scene-report.json","blender-scene-validation.json","Level.blend","Skybox.blend","export.log","export-manifest.json"})
+            QFile::remove(QDir(selectedOutput).filePath(file));
+        QDir textures(QDir(selectedOutput).filePath("textures"));
+        for(const QString &file:textures.entryList({"recolored_*.png"},QDir::Files))textures.remove(file);
+        QDir(selectedOutput).rmdir("textures");
+        append("Removed older generic scene files for this source.\n");
+    }
+    bool publish(QString &error) {
+        if(stagingPath.isEmpty()){error="Export staging location is missing.";return false;}
+        QStringList files;
+        QDirIterator it(stagingPath,QDir::Files,QDirIterator::Subdirectories);
+        while(it.hasNext()){it.next();files<<QDir(stagingPath).relativeFilePath(it.filePath());}
+        std::sort(files.begin(),files.end(),[](const QString &a,const QString &b){
+            const bool blendA=a.endsWith(".blend",Qt::CaseInsensitive),blendB=b.endsWith(".blend",Qt::CaseInsensitive);
+            return blendA==blendB?a<b:!blendA;
+        });
+        if(files.isEmpty()){error="Exporter produced no files.";return false;}
+        QStringList oldFiles;
+        const QString manifestPath=QDir(selectedOutput).filePath(exportPrefix+".manifest.json");
+        QFile manifest(manifestPath);
+        if(manifest.open(QIODevice::ReadOnly)){
+            for(const auto &entry:QJsonDocument::fromJson(manifest.readAll()).array())oldFiles<<entry.toString();
+            manifest.close();
+        }
+        QStringList published;
+        for(const QString &relative:files){
+            const QString name=publishedName(relative);
+            if(!replaceFile(QDir(stagingPath).filePath(relative),QDir(selectedOutput).filePath(name),error))return false;
+            published<<name;
+        }
+        for(const QString &old:oldFiles)if(!published.contains(old) && old.startsWith(exportPrefix+".") && !old.contains("..") && !QDir::isAbsolutePath(old)){
+            const QString target=QDir(selectedOutput).filePath(old);
+            if(QFileInfo(target).isFile() && !QFile::remove(target))append("Could not remove stale export file: "+target+"\n");
+        }
+        QFile::remove(QDir(selectedOutput).filePath(exportPrefix+".last-failed-report.json"));
+        QJsonArray entries;for(const QString &name:published)entries.append(name);
+        QSaveFile newManifest(manifestPath);
+        if(!newManifest.open(QIODevice::WriteOnly) || newManifest.write(QJsonDocument(entries).toJson())<0 || !newManifest.commit()){
+            error="Could not update the export manifest.";return false;
+        }
+        cleanMatchingLegacyScene();
+        resultPath=QDir(selectedOutput).filePath(exportPrefix+".blend");
+        bundlePath=QDir(selectedOutput).filePath(exportPrefix+"."+(mode=="animation"?"knight-animations.json":"scene.json"));
+        append(QString("Updated %1 named export files in %2\n").arg(published.size()).arg(selectedOutput));
+        return true;
+    }
     void finish(bool success, const QString &message) {
         if(!busy) return;
+        if(!success && !stagingPath.isEmpty()){
+            QString reportName=mode=="animation"?"export-report.json":"scene-report.json";
+            QString report=QDir(stagingPath).filePath(reportName),error;
+            if(QFileInfo::exists(report))replaceFile(report,QDir(selectedOutput).filePath(exportPrefix+".last-failed-report.json"),error);
+            append("Previous completed export files remain available.\n");
+        }
         append("\n"+message+"\n"); pending.clear(); busy=false;
         status->setText(message); run->setEnabled(true); cancel->setEnabled(false);
         tabs->setEnabled(true); progress->setRange(0,1); progress->setValue(success?1:0);
         openResult->setEnabled(success); logFile.close();
+        clearStage();
         if(batch) QTimer::singleShot(0,qApp,[success]{QCoreApplication::exit(success?0:1);});
     }
     void next() {
-        if(cancelled){finish(false,"Cancelled. Partial files are retained; use a new output folder to retry.");return;}
+        if(cancelled){finish(false,"Cancelled. The selected folder remains available for retry.");return;}
         if(pending.isEmpty()) {
             if(!QFileInfo::exists(resultPath)){finish(false,"Backend exited without the expected .blend file.");return;}
             QFile report(QFileInfo(bundlePath).dir().filePath(mode=="animation"?"export-report.json":"scene-report.json"));
@@ -67,7 +171,10 @@ class Studio : public QMainWindow {
             if(report.open(QIODevice::ReadOnly)) {
                 auto doc=QJsonDocument::fromJson(report.readAll()).object();
                 warnings=doc.value(mode=="animation"?"skipped":"issues").toArray().size();
+                report.close();
             }
+            QString error;
+            if(!publish(error)){finish(false,"Export could not replace the selected files: "+error);return;}
             finish(true,QString("Export complete — %1 reported limitations. %2").arg(warnings).arg(resultPath));return;
         }
         active=pending.takeFirst();status->setText(active.title);
@@ -131,8 +238,8 @@ public:
         globals=pathRow(form,"Legacy scene globals XML","globals",false,backend("scene_global.xml"));
         legacy=pathRow(form,"Original SKAnimatorTools.exe","legacy",false);
         colorNode=pathRow(form,"Optional color node .blend","color-node",false);
-        output=pathRow(form,"New export folder","output",true);
-        output->setPlaceholderText("Enter a new folder; existing folders are never overwritten");
+        output=pathRow(form,"Export folder (reused)","output",true);
+        output->setPlaceholderText("Choose one folder for all named level, skybox and animation exports");
         layout->addWidget(config);
         tabs=new QTabWidget;
         auto animations=new QWidget;auto animLayout=new QVBoxLayout(animations);
@@ -169,22 +276,24 @@ public:
     }
     void start(const QString &kind,const QString &source) {
         if(busy)return;
-        busy=true;cancelled=false;mode=kind;log->clear();
-        QString logs=QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)+"/logs";QDir().mkpath(logs);
-        logFile.setFileName(logs+"/export-"+QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss-zzz")+".log");
-        if(!logFile.open(QIODevice::WriteOnly)){finish(false,"Cannot open export log.");return;}
+        busy=true;cancelled=false;mode=kind;currentSource=source;log->clear();pending.clear();selectedOutput.clear();stagingPath.clear();
+        auto fail=[this](const QString &s){finish(false,s);};
+        if(output->text().trimmed().isEmpty()){fail("Choose an export folder.");return;}
+        QString destination=QFileInfo(output->text()).absoluteFilePath();
+        if(!QDir().mkpath(destination)){fail("Cannot create the selected export folder.");return;}
+        selectedOutput=destination;
+        exportPrefix=prefixFor(kind,source,game->text());
+        logFile.setFileName(QDir(destination).filePath(exportPrefix+".export.log"));
+        if(!logFile.open(QIODevice::WriteOnly|QIODevice::Truncate)){fail("Cannot replace the export log in the selected folder.");return;}
         append("ThreeRings Studio " TRS_VERSION "\nLog: "+logFile.fileName()+"\nMode: "+kind+"\nSource: "+source+"\n");
         QFile identity(QCoreApplication::applicationDirPath()+"/build-identity.json");
         if(identity.open(QIODevice::ReadOnly))append(QString::fromUtf8(identity.readAll())+"\n");
-        auto fail=[this](const QString &s){finish(false,s);};
-        if(output->text().trimmed().isEmpty()){fail("Enter a new export folder.");return;}
-        QString destination=QFileInfo(output->text()).absoluteFilePath();
-        if(QFileInfo::exists(destination)){fail("Output folder already exists. Choose a new folder to protect existing work.");return;}
         QString rsrc=QDir(game->text()).filePath("rsrc");
         if(!QFileInfo::exists(rsrc+"/character/pc/model.dat")){fail("Game resource directory is incomplete.");return;}
         if(!QFileInfo(blender->text()).isFile()){fail("Select a Blender 4.2 LTS executable.");return;}
         if(kind!="animation"&&!QFileInfo(source).isFile()){fail("Select a readable source file.");return;}
         if(!QFileInfo::exists(backend("trs-export.jar"))||!QFileInfo::exists(backend("build_blend.py"))){fail("Backend files missing. Restore the complete application folder.");return;}
+        stagingPath=QDir(destination).filePath(".trs-stage-"+QUuid::createUuid().toString(QUuid::WithoutBraces));
         QString javaPath=java->text();
         if(javaPath.isEmpty()) {
             QString runtime=QDir(game->text()).filePath("java_vm");javaPath=runtime+"/bin/java.exe";
@@ -197,14 +306,15 @@ public:
         if(pending.isEmpty()&&!QFileInfo(javaPath).isFile()){fail("Java executable missing; choose a runtime compatible with the installed game.");return;}
         QStringList args={"-Xmx4g","-Xshare:off","-cp",backend("trs-export.jar")+QDir::listSeparator()+QDir(game->text()).filePath("code/*"),kind=="animation"?"KnightAnimationExport":"SceneExport",rsrc};
         if(kind!="animation")args<<source;
-        args<<destination;
+        args<<stagingPath;
         if(kind!="animation"&&!globals->text().isEmpty()){
             if(!QFileInfo(globals->text()).isFile()){fail("Legacy globals XML path does not exist. Select it or clear the field.");return;}
             args<<globals->text();
         }
         pending.append({"Extract game data",javaPath,args});
-        bundlePath=destination+(kind=="animation"?"/knight-animations.json":"/scene.json");resultPath=destination+"/"+(kind=="animation"?"Knight-Animations.blend":kind=="scene"?"Level.blend":"Skybox.blend");
-        QStringList blendArgs={"--background","--factory-startup","--python-exit-code","1","--python",backend("build_blend.py"),"--",kind,bundlePath,resultPath};
+        bundlePath=stagingPath+(kind=="animation"?"/knight-animations.json":"/scene.json");resultPath=stagingPath+"/"+(kind=="animation"?"Knight-Animations.blend":kind=="scene"?"Level.blend":"Skybox.blend");
+        QString logicalBundle=QDir(destination).filePath(exportPrefix+"."+(kind=="animation"?"knight-animations.json":"scene.json"));
+        QStringList blendArgs={"--background","--factory-startup","--python-exit-code","1","--python",backend("build_blend.py"),"--",kind,bundlePath,resultPath,"--logical-bundle",logicalBundle};
         if(kind=="animation"&&ueNames->isChecked())blendArgs<<"--ue-names";
         if(kind=="animation"&&fbx->isChecked())blendArgs<<"--fbx";
         if(!colorNode->text().isEmpty()){

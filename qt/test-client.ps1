@@ -6,8 +6,7 @@ param(
     [Parameter(Mandatory=$true)][string]$TestDirectory
 )
 $ErrorActionPreference = 'Stop'
-if (Test-Path -LiteralPath $TestDirectory) { throw 'Use a new test directory' }
-New-Item -ItemType Directory -Path $TestDirectory | Out-Null
+New-Item -ItemType Directory -Path $TestDirectory -Force | Out-Null
 $common = @('--game', $GameDirectory, '--blender', $Blender, '--java', $Java)
 $results = [System.Collections.Generic.List[object]]::new()
 function Check-Failure([string]$Name, [string[]]$Arguments) {
@@ -19,13 +18,13 @@ $existing = Join-Path $TestDirectory 'existing'
 New-Item -ItemType Directory -Path $existing | Out-Null
 'preserve me' | Set-Content (Join-Path $existing 'sentinel.txt')
 $before = (Get-FileHash (Join-Path $existing 'sentinel.txt')).Hash
-Check-Failure 'existing output protection' ($common + @('--batch','animation','--output',$existing))
-if ((Get-FileHash (Join-Path $existing 'sentinel.txt')).Hash -ne $before) { throw 'Existing output changed' }
 $invalid = Join-Path $TestDirectory 'invalid-scene'
 'not a scene' | Set-Content $invalid
-Check-Failure 'invalid scene stops pipeline' ($common + @('--batch','scene','--source',$invalid,'--output',(Join-Path $TestDirectory 'invalid-output')))
-Check-Failure 'failed process launch' @('--game',$GameDirectory,'--blender',$Blender,'--java',(Join-Path (Split-Path $Client) 'backend/trs-export.jar'),'--batch','animation','--output',(Join-Path $TestDirectory 'failed-launch'))
-Check-Failure 'cancel stops pipeline' ($common + @('--batch','animation','--output',(Join-Path $TestDirectory 'cancelled'),'--cancel-after-ms','20'))
-if (Get-ChildItem -LiteralPath $TestDirectory -Recurse -Filter '*.blend') { throw 'Failure path incorrectly produced a blend' }
+Check-Failure 'invalid scene stops pipeline in existing folder' ($common + @('--batch','scene','--source',$invalid,'--output',$existing))
+Check-Failure 'failed process launch in existing folder' @('--game',$GameDirectory,'--blender',$Blender,'--java',(Join-Path (Split-Path $Client) 'backend/trs-export.jar'),'--batch','animation','--output',$existing)
+Check-Failure 'cancel stops pipeline in existing folder' ($common + @('--batch','animation','--output',$existing,'--cancel-after-ms','20'))
+if ((Get-FileHash (Join-Path $existing 'sentinel.txt')).Hash -ne $before) { throw 'Unrelated output changed' }
+if (Get-ChildItem -LiteralPath $existing -Filter '*.blend') { throw 'Failure path incorrectly produced a blend' }
+if (Get-ChildItem -LiteralPath $existing -Force -Directory -Filter '.trs-stage-*') { throw 'Temporary staging folder was retained' }
 $results | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $TestDirectory 'client-test-results.json')
 $results | Format-Table

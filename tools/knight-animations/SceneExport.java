@@ -20,13 +20,52 @@ public final class SceneExport {
     static final Map<String,Integer> meshIds=new LinkedHashMap<>();
     static final Map<String,Object> materials=new LinkedHashMap<>();
     static final Map<String,Object> placements=new LinkedHashMap<>();
+    static final Map<String,LegacyAlias> legacyAliases=new LinkedHashMap<>();
     static final Map<String,Integer> kinds=new TreeMap<>(), modelKinds=new TreeMap<>();
     static final Set<String> issueKeys=new HashSet<>();
     static int errors=0;
+    static final class LegacyAlias {
+        final String target, definition;
+        final Object targetReference;
+        LegacyAlias(String target,Object targetReference,String definition){this.target=target;this.targetReference=targetReference;this.definition=definition;}
+    }
     static Object f(Object o,String n)throws Exception{return KnightAnimationExport.field(o,n);}
     static Object opt(Object o,String n){try{return f(o,n);}catch(Exception e){return null;}}
     static Map<String,Object> map(Object...p){return KnightAnimationExport.map(p);}
     static Object call(Object o,String name)throws Exception{return o.getClass().getMethod(name).invoke(o);}
+    static org.w3c.dom.Element child(org.w3c.dom.Element element,String tag){
+        if(element==null)return null;
+        for(org.w3c.dom.Node node=element.getFirstChild();node!=null;node=node.getNextSibling())
+            if(node instanceof org.w3c.dom.Element&&node.getNodeName().equals(tag))return (org.w3c.dom.Element)node;
+        return null;
+    }
+    static String xml(org.w3c.dom.Node node)throws Exception{
+        ByteArrayOutputStream bytes=new ByteArrayOutputStream();
+        javax.xml.transform.Transformer transformer=javax.xml.transform.TransformerFactory.newInstance().newTransformer();
+        transformer.setOutputProperty(javax.xml.transform.OutputKeys.OMIT_XML_DECLARATION,"yes");
+        transformer.transform(new javax.xml.transform.dom.DOMSource(node),new javax.xml.transform.stream.StreamResult(bytes));
+        return bytes.toString("UTF-8");
+    }
+    static Object importedReference(org.w3c.dom.Element element)throws Exception{
+        org.w3c.dom.Document document=javax.xml.parsers.DocumentBuilderFactory.newInstance().newDocumentBuilder().newDocument();
+        org.w3c.dom.Element java=document.createElement("java");java.setAttribute("class","com.threerings.export.XMLImporter");java.setAttribute("version","1.0");document.appendChild(java);
+        org.w3c.dom.Element object=document.createElement("object");object.setAttribute("class","com.threerings.config.ConfigReference");java.appendChild(object);
+        for(org.w3c.dom.Node node=element.getFirstChild();node!=null;node=node.getNextSibling())object.appendChild(document.importNode(node,true));
+        Object reader=Class.forName("com.threerings.export.XMLImporter").getConstructor(InputStream.class).newInstance(new ByteArrayInputStream(xml(document).getBytes("UTF-8")));
+        try{return call(reader,"qe");}finally{call(reader,"close");}
+    }
+    static Object resolveGlobal(Object sceneManager,Object reference,Set<String>visited)throws Exception{
+        String key=name(reference);
+        LegacyAlias alias=legacyAliases.get(key);
+        if(alias!=null){
+            if(!visited.add(key))throw new IOException("Cyclic scene-global reference: "+visited);
+            try{return resolveGlobal(sceneManager,alias.targetReference,visited);}finally{visited.remove(key);}
+        }
+        Object original=resolve(sceneManager,Class.forName("com.threerings.tudey.config.SceneGlobalConfig"),reference);
+        Class<?> originalClass=Class.forName("com.threerings.tudey.config.SceneGlobalConfig$Original");
+        if(originalClass.isInstance(original)&&original!=Class.forName("com.threerings.tudey.config.SceneGlobalConfig").getField("bSl").get(null))return original;
+        throw new IOException("Missing scene-global configuration: "+key);
+    }
     static Object resolve(Object mgr,Class<?> type,Object ref)throws Exception {
         Object result=cm.getMethod("a",Class.class,refClass).invoke(mgr,type,ref);
         if(result==null)throw new IOException("Unresolved "+type.getSimpleName()+": "+ref);
@@ -41,6 +80,9 @@ public final class SceneExport {
         if(value==null||value instanceof String||value instanceof Number||value instanceof Boolean)return value;
         if(value instanceof Enum)return value.toString();
         if(depth>3)return map("class",value.getClass().getName());
+        if(value instanceof Map){Map<String,Object>r=new LinkedHashMap<>();
+            for(Map.Entry<?,?>item:((Map<?,?>)value).entrySet())r.put(String.valueOf(item.getKey()),snapshot(item.getValue(),depth+1));
+            return r;}
         if(value.getClass().isArray()){List<Object>r=new ArrayList<>();for(int i=0;i<Math.min(Array.getLength(value),128);i++)r.add(snapshot(Array.get(value,i),depth+1));return r;}
         Map<String,Object>r=map("class",value.getClass().getName());
         for(Field field:value.getClass().getFields())if(!Modifier.isStatic(field.getModifiers())&&!Modifier.isTransient(field.getModifiers()))try{r.put(field.getName(),snapshot(field.get(value),depth+1));}catch(Exception ignored){}
@@ -100,6 +142,14 @@ public final class SceneExport {
         for(org.w3c.dom.Element entry:entries){
             org.w3c.dom.Element implementation=null;
             for(org.w3c.dom.Node n=entry.getFirstChild();n!=null;n=n.getNextSibling())if(n instanceof org.w3c.dom.Element&&n.getNodeName().equals("implementation"))implementation=(org.w3c.dom.Element)n;
+            if(implementation!=null&&implementation.getAttribute("class").equals("com.threerings.tudey.config.SceneGlobalConfig$Derived")){
+                org.w3c.dom.Element target=child(implementation,"sceneGlobal");
+                String aliasName=child(entry,"name").getTextContent().trim();
+                if(target==null||child(target,"name")==null)throw new IOException("Derived scene-global has no target: "+aliasName);
+                String targetName=child(target,"name").getTextContent().trim();
+                legacyAliases.put(aliasName,new LegacyAlias(targetName,importedReference(target),xml(entry)));
+                object.removeChild(entry);continue;
+            }
             if(implementation==null||!(implementation.getAttribute("class").equals("com.threerings.tudey.config.SceneGlobalConfig$EnvironmentModel")||implementation.getAttribute("class").equals("com.threerings.tudey.config.SceneGlobalConfig$Camera"))){object.removeChild(entry);continue;}
             entry.setAttribute("class",implementation.getAttribute("class"));
             while(implementation.hasChildNodes())entry.appendChild(implementation.getFirstChild());
@@ -137,9 +187,13 @@ public final class SceneExport {
                     java.awt.image.BufferedImage image=javax.imageio.ImageIO.read(resources.resolve(file).toFile());
                     if(image==null)throw new IOException("Cannot decode recolor source "+file);
                     image=(java.awt.image.BufferedImage)Class.forName("com.threerings.media.image.d").getMethod("a",java.awt.image.BufferedImage.class,colors.getClass()).invoke(null,image,colors);
-                    String relative="textures/recolored_"+recolored.size()+".png";
-                    Path target=output.resolve(relative);Files.createDirectories(target.getParent());
-                    if(!javax.imageio.ImageIO.write(image,"png",target.toFile()))throw new IOException("PNG encoder unavailable");
+                    ByteArrayOutputStream png=new ByteArrayOutputStream();
+                    if(!javax.imageio.ImageIO.write(image,"png",png))throw new IOException("PNG encoder unavailable");
+                    byte[] bytes=png.toByteArray();
+                    byte[] digest=java.security.MessageDigest.getInstance("SHA-256").digest(bytes);
+                    StringBuilder hex=new StringBuilder();for(int i=0;i<12;i++)hex.append(String.format("%02x",digest[i]&255));
+                    String relative="trs-texture-"+hex+".png";
+                    Path target=output.resolve(relative);Files.createDirectories(target.getParent());Files.write(target,bytes);
                     result="@bundle/"+relative;
                     recolored.put(key,result);
                 }
@@ -327,8 +381,9 @@ public final class SceneExport {
                 Object reference=call(entry,"getReference");
                 if(kind.equals("GlobalEntry")){
                     Object original=entry.getClass().getMethod("az",cm).invoke(entry,manager);
-                    if(original==Class.forName("com.threerings.tudey.config.SceneGlobalConfig").getField("bSl").get(null))issue("Global "+reference,"Unresolved global configuration");
-                    metadata.add(map("id",id,"type",kind,"reference",String.valueOf(reference),"configuration",snapshot(original,0)));
+                    LegacyAlias alias=legacyAliases.get(name(reference));
+                    if(original==Class.forName("com.threerings.tudey.config.SceneGlobalConfig").getField("bSl").get(null))original=resolveGlobal(manager,reference,new LinkedHashSet<>());
+                    metadata.add(map("id",id,"type",kind,"reference",String.valueOf(reference),"configuration",snapshot(original,0),"legacyAlias",alias==null?null:map("target",alias.target,"targetReference",String.valueOf(alias.targetReference),"selectedArguments",snapshot(f(reference,"_arguments"),0),"definitionXml",alias.definition)));
                     Object model=opt(original,"model");
                     if(model!=null)for(Map<String,Object>part:asset(model,manager,new HashSet<>())){
                         Map<String,Object>placed=transformed(part,matrix(opt(original,"transform")));

@@ -15,6 +15,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("mode", choices=["animation", "scene", "skybox"])
 parser.add_argument("bundle")
 parser.add_argument("destination")
+parser.add_argument("--logical-bundle", help="Final named JSON path after the staged export is published")
 parser.add_argument("--ue-names", action="store_true")
 parser.add_argument("--fbx", action="store_true")
 parser.add_argument("--color-node", help="Optional .blend library containing ColorReplacementNode")
@@ -33,7 +34,17 @@ if args.mode == "animation":
     if args.fbx:
         export_fbx(rig, actions, destination.parent / "fbx")
 else:
-    import_scene(args.bundle)
+    root = import_scene(args.bundle)
+    if args.logical_bundle:
+        root["trs_bundle"] = str(Path(args.logical_bundle).resolve())
+if args.mode == "animation" and args.logical_bundle:
+    rig["trs_source_bundle"] = str(Path(args.logical_bundle).resolve())
+if args.logical_bundle:
+    staged = str(Path(args.bundle).resolve().parent)
+    published = str(Path(args.logical_bundle).resolve().parent)
+    for image in bpy.data.images:
+        if image.filepath and image.filepath.startswith(staged):
+            image.filepath = published + image.filepath[len(staged):]
 if args.color_node:
     # Preserve the user's editable node; native baked materials remain the default.
     with bpy.data.libraries.load(str(Path(args.color_node).resolve()), link=False) as (source, target):
