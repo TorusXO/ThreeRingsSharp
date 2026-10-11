@@ -228,7 +228,7 @@ public final class SceneExport {
         }
     }
     static Map<String,Object> materialSurface(Object reference,Object mgr)throws Exception {
-        String mode="OPAQUE", resolved=null;
+        String mode="OPAQUE", resolved=null, overlayMode=null;
         double threshold=0.5;
         Set<String> visited=new HashSet<>();
         Class<?> materialType=Class.forName("com.threerings.opengl.material.config.MaterialConfig");
@@ -238,7 +238,16 @@ public final class SceneExport {
             Map<?,?> args=(Map<?,?>)f(current,"_arguments");
             Object value=args.get("Alpha Threshold");
             if(value instanceof Number)threshold=((Number)value).doubleValue();
-            if(referenceName.contains("Masked"))mode="MASKED";
+            if(referenceName.contains("Sphere Overlay/Additive Mask")){
+                overlayMode="ADDITIVE_SPHERE";
+                String mask=String.valueOf(args.get("Mask"));
+                if(mask.startsWith("Masked")){
+                    mode="MASKED";
+                    threshold=mask.contains("Hard")?0.999:0.75;
+                }else mode="OPAQUE";
+            }
+            else if(referenceName.startsWith("Model/Opaque"))mode="OPAQUE";
+            else if(referenceName.contains("Masked"))mode="MASKED";
             else if(referenceName.contains("Translucent"))mode="TRANSLUCENT";
             else if(referenceName.contains("Additive"))mode="ADDITIVE";
             else if(referenceName.contains("Opaque"))mode="OPAQUE";
@@ -247,7 +256,7 @@ public final class SceneExport {
             if(next==null){resolved=referenceName;break;}
             current=next;
         }
-        return map("alphaMode",mode,"alphaThreshold",threshold,"resolvedMaterial",resolved);
+        return map("alphaMode",mode,"alphaThreshold",threshold,"resolvedMaterial",resolved,"overlayMode",overlayMode);
     }
     static String material(Object impl,Object mesh,Object mgr,String source)throws Exception {
         String texture=String.valueOf(f(mesh,"texture")),tag=String.valueOf(f(mesh,"tag"));
@@ -258,7 +267,7 @@ public final class SceneExport {
         String key=ref==null?source+"|"+texture:ref.toString();
         if(materials.containsKey(key))return key;
         Set<String> files=new LinkedHashSet<>();
-        Map<String,Object> surface=map("alphaMode","OPAQUE","alphaThreshold",0.5,"resolvedMaterial",null);
+        Map<String,Object> surface=map("alphaMode","OPAQUE","alphaThreshold",0.5,"resolvedMaterial",null,"overlayMode",null);
         if(ref!=null)try{
             textureFiles(resolve(mgr,Class.forName("com.threerings.opengl.material.config.MaterialConfig"),ref),files,Collections.newSetFromMap(new IdentityHashMap<>()),0,mgr);
             surface=materialSurface(ref,mgr);
@@ -276,6 +285,7 @@ public final class SceneExport {
         }
         Map<String,Object> record=map("name",texture,"reference",ref==null?null:ref.toString(),"textures",files,"parameters",parameters);
         record.putAll(surface);
+        if("ADDITIVE_SPHERE".equals(surface.get("overlayMode")))issue(source,"Runtime feature retained as material metadata: additive sphere sheen is not recreated in Blender");
         materials.put(key,record);
         return key;
     }
@@ -430,6 +440,12 @@ public final class SceneExport {
             try{
                 Object reference=call(entry,"getReference");
                 if(kind.equals("GlobalEntry")){
+                    if(reference==null){
+                        emptyEntries++;
+                        metadata.add(map("id",id,"type",kind,"reference",null,"archivedId",f(entry,"_id"),"configuration",null,"reason","null scene-global reference"));
+                        issue("Entry "+id+" GlobalEntry","Runtime feature retained as metadata: null scene-global entry has no model reference");
+                        continue;
+                    }
                     Object original=entry.getClass().getMethod("az",cm).invoke(entry,manager);
                     LegacyAlias alias=legacyAliases.get(name(reference));
                     Map<?,?> selected=(Map<?,?>)f(reference,"_arguments");

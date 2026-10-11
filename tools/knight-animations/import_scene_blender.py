@@ -44,6 +44,7 @@ def import_scene(path):
         alpha_mode = source.get("alphaMode") or next((mode for word, mode in (("Masked", "MASKED"), ("Translucent", "TRANSLUCENT"), ("Additive", "ADDITIVE")) if word in key), "OPAQUE")
         material["trs_alpha_mode"] = alpha_mode
         material["trs_alpha_threshold"] = source.get("alphaThreshold", 0.5)
+        material["trs_overlay_mode"] = source.get("overlayMode") or ""
         nodes, links = material.node_tree.nodes, material.node_tree.links
         bsdf = nodes.get("Principled BSDF")
         bsdf.inputs["Roughness"].default_value = 1
@@ -306,6 +307,11 @@ def import_scene(path):
         {"name": data["materials"][key]["name"], "reference": data["materials"][key].get("reference"), "mesh_instances": uses}
         for key, uses in sorted(visible_material_uses.items()) if key in opaque_alpha_materials
     ]
+    unrendered_overlay_materials = [
+        {"name": data["materials"][key]["name"], "reference": data["materials"][key].get("reference"),
+         "overlay_mode": data["materials"][key]["overlayMode"], "mesh_instances": uses}
+        for key, uses in sorted(visible_material_uses.items()) if data["materials"][key].get("overlayMode")
+    ]
     report = dict(mesh_definitions=len(meshes), unique_meshes=len(mesh_cache), reused_mesh_definitions=len(meshes)-len(mesh_cache), unique_texture_images=len(image_cache), mesh_instances=sum(o.type == "MESH" for o in objects),
                   source_placement_checks=placement_checks, maximum_source_placement_error=placement_error,
                   runtime_instances=sum(o.type == "EMPTY" for o in objects), materials=len(materials),
@@ -317,7 +323,8 @@ def import_scene(path):
                   editor_marker_mesh_instances=sum(o.type == "MESH" and bool(o.get("trs_editor_marker")) for o in objects),
                   editor_marker_location_instances=sum(o.type == "EMPTY" and bool(o.get("trs_editor_marker")) for o in objects),
                   editor_markers_visible=not groups["Editor markers"].hide_viewport,
-                  alpha_bearing_opaque_materials=alpha_bearing_opaque_materials)
+                  alpha_bearing_opaque_materials=alpha_bearing_opaque_materials,
+                  unrendered_overlay_materials=unrendered_overlay_materials)
     (path.parent / "blender-scene-validation.json").write_text(json.dumps(report, indent=2))
     print("TRS_SCENE_IMPORT:", report)
     return root

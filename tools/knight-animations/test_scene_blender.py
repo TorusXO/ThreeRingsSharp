@@ -45,7 +45,8 @@ with tempfile.TemporaryDirectory(prefix="trs-scene-test-") as directory:
                           reference="fixture", mesh=None, matrix=identity, editorOnly=True, kind="wave"))
     data = dict(format="trs-scene-1", name="Regression fixture", resourceDirectory=str(root),
                 materials={"a":dict(name="a",textures=["first.png"],parameters={},alphaMode="MASKED",alphaThreshold=0.92),
-                           "b":dict(name="b",textures=["second.png"],parameters={"Color State Override":[0.5,1,1,1]})},
+                           "b":dict(name="b",textures=["second.png"],parameters={"Color State Override":[0.5,1,1,1]},
+                                    alphaMode="OPAQUE",overlayMode="ADDITIVE_SPHERE")},
                 meshes=meshes, instances=instances, metadata=[])
     path = root / "scene.json"
     path.write_text(json.dumps(data))
@@ -63,6 +64,9 @@ with tempfile.TemporaryDirectory(prefix="trs-scene-test-") as directory:
     assert alpha_link.from_node.operation == "GREATER_THAN"
     assert abs(alpha_link.from_node.inputs[1].default_value - 0.92) < 1e-6
     assert masked.surface_render_method == "DITHERED"
+    overlay = objects[1].material_slots[0].material
+    assert overlay["trs_alpha_mode"] == "OPAQUE" and overlay["trs_overlay_mode"] == "ADDITIVE_SPHERE"
+    assert overlay.node_tree.nodes["Material Output"].inputs["Surface"].links[0].from_node.type == "BSDF_PRINCIPLED"
     markers = next(c for c in collection.children if c.name == "Editor markers")
     assert not markers.hide_viewport and markers.hide_render
     assert objects[4].name in markers.objects
@@ -72,4 +76,5 @@ with tempfile.TemporaryDirectory(prefix="trs-scene-test-") as directory:
     assert report["editor_marker_instances"] == 2 and report["editor_markers_visible"]
     assert report["editor_marker_mesh_instances"] == 1 and report["editor_marker_location_instances"] == 1
     assert report["alpha_bearing_opaque_materials"][0]["name"] == "b", (report["alpha_bearing_opaque_materials"], list(images[0].pixels))
+    assert report["unrendered_overlay_materials"][0]["mesh_instances"] == 1
 print("TRS_SCENE_REGRESSION: PASS — material/alpha, visible markers, transforms, UV/color isolation, image reuse")
