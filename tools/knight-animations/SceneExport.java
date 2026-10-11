@@ -72,6 +72,15 @@ public final class SceneExport {
         return result;
     }
     static String name(Object ref)throws Exception{return (String)call(ref,"getName");}
+    static Object legacyPlaceableModel(Object reference)throws Exception {
+        if(!name(reference).equals("Dynamic/Block/Treasure/Clockwork Tunnels"))return null;
+        // The installed placeable_tudey.xml defines its normal treasure block
+        // with this model and variant; the archived reference is unavailable.
+        Object model=refClass.getConstructor(String.class).newInstance("world/dynamic/block/treasure/model.dat");
+        ((Map)f(model,"_arguments")).put("Variant","Green");
+        issue(name(reference),"Legacy placeable represented by current-game normal treasure block (Variant Green); archived Clockwork Tunnels variant unavailable");
+        return model;
+    }
     static double[][] identity(){return new double[][]{{1,0,0,0},{0,1,0,0},{0,0,1,0},{0,0,0,1}};}
     static double[][] matrix(Object o)throws Exception{return o==null?identity():KnightAnimationExport.matrix(o);}
     static double[][] mul(double[][]a,double[][]b){double[][]r=new double[4][4];for(int i=0;i<4;i++)for(int j=0;j<4;j++)for(int k=0;k<4;k++)r[i][j]+=a[i][k]*b[k][j];return r;}
@@ -91,7 +100,7 @@ public final class SceneExport {
     }
     static void marker(List<Map<String,Object>>parts,String source,String type,Object impl){parts.add(map("mesh",null,"matrix",identity(),"kind",type,"detail",source,"configuration",snapshot(impl,0)));}
     static void issue(String source,String reason){if(issueKeys.add(source+reason)){
-        boolean limitation=reason.startsWith("Runtime feature retained")||reason.startsWith("GUI text billboard retained")||reason.startsWith("Legacy static-set variant substituted");
+        boolean limitation=reason.startsWith("Runtime feature retained")||reason.startsWith("GUI text billboard retained")||reason.startsWith("Legacy static-set variant substituted")||reason.startsWith("Legacy placeable represented by");
         if(!limitation)errors++;
         issues.add(map("source",source,"reason",reason,"severity",limitation?"limitation":"error"));
     }}
@@ -413,7 +422,11 @@ public final class SceneExport {
                 Object original=entry.getClass().getMethod(method,cm).invoke(entry,manager);
                 if(original==null)throw new IOException("Missing scene entry configuration: "+reference);
                 Object model=f(original,"model");if(model==null){emptyEntries++;continue;}
-                if(name(model).equals("editor/error/model.dat"))throw new IOException("Game returned an error placeholder for "+reference+"; required placeable/tile config is missing");
+                if(name(model).equals("editor/error/model.dat")){
+                    Object substitute=kind.equals("PlaceableEntry")?legacyPlaceableModel(reference):null;
+                    if(substitute==null)throw new IOException("Game returned an error placeholder for "+reference+"; required placeable/tile config is missing");
+                    model=substitute;
+                }
                 Object transform;
                 if(kind.equals("TileEntry")){
                     Object location=f(entry,"_location");

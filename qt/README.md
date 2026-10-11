@@ -31,6 +31,8 @@ Some archived scenes use a parameter-only `Environment/Model` global with a mode
 
 Some archived Castle floor-edge tiles request an old `edge_thin_corner_Out_02` static-set key. If the installed game model contains `edge_corner_out_02`, that available geometry is used and recorded as a limitation in the scene report. The result is an approximation of the archived variant.
 
+Clockwork Tutorial Depth 1 uses an old `Dynamic/Block/Treasure/Clockwork Tunnels` placeable absent from both the saved and installed placeable catalogs. When the game returns its error placeholder for exactly that reference, the exporter uses the current game's normal treasure-block model with its Green variant, as defined in `placeable_tudey.xml`. The original placeable reference stays in instance metadata and the substitution is recorded as a limitation. Its historic variant and gameplay behavior are not reconstructed.
+
 Static geometry, native recoloring, vertex colors, alpha/additive materials and skybox geometry are implemented. Particle systems, procedural effects, GUI billboards, animated texture scrolling/atlases, engine fog, light sets, projected shadows and camera-follow behavior are not a complete Blender recreation of the game renderer. Unsupported runtime features remain named metadata objects and are reported as limitations. Resolution/geometry/material errors stop the pipeline. The game-specific shader conversions are approximations, not a pixel-identical renderer.
 
 ## Build and validate
@@ -38,7 +40,7 @@ Static geometry, native recoloring, vertex colors, alpha/additive materials and 
 `build.ps1` defaults to the installed Qt 6.11.2 MinGW kit, CMake, Ninja and JDK 21. It builds C++ Release, compiles the extension to Java 11 bytecode, deploys Qt and packages Python scripts and compatibility XML. The Java **runtime** must still support the installed game jars (Java 25 for the tested installation).
 
 ```powershell
-./qt/build.ps1 -Destination ./releases/ThreeRingsStudio-0.2.3-preview
+./qt/build.ps1 -Destination ./releases/ThreeRingsStudio-0.2.4-preview
 ```
 
 Override paths with `-QtDirectory`, `-QtToolsDirectory`, `-JdkDirectory`, `-BuildDirectory`, `-Destination`. Deployment writes `build-identity.json` with executable/backend hashes and source/build identity. Qt is dynamically linked; deployed license texts remain alongside the executable. The build does not compile or alter the legacy C# applications.
