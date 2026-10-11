@@ -6,6 +6,7 @@ Use --python-exit-code 1 in automated runs. Existing scene objects are preserved
 import json
 import hashlib
 from array import array
+from collections import Counter
 import math
 import sys
 from pathlib import Path
@@ -258,6 +259,19 @@ def import_scene(path):
         raise ValueError(f"Scene transform error {max_error}; object hierarchy may require shear preservation")
     if missing_images:
         raise FileNotFoundError("Missing textures: " + ", ".join(missing_images))
+    visible_material_uses = Counter(
+        data["meshes"][instance["mesh"]]["material"]
+        for instance in data["instances"]
+        if instance["mesh"] is not None and not instance.get("skybox")
+        and not instance.get("editorOnly")
+    )
+    untextured_visible_materials = [
+        {"name": data["materials"][key]["name"],
+         "reference": data["materials"][key]["reference"],
+         "mesh_instances": uses}
+        for key, uses in sorted(visible_material_uses.items())
+        if not data["materials"][key]["textures"]
+    ]
     visible = [o for o in objects if o.type == "MESH" and not o.get("trs_skybox") and not any(c.hide_viewport for c in o.users_collection)]
     points = [o.matrix_world @ Vector(p) for o in visible for p in o.bound_box]
     if points:
@@ -277,7 +291,8 @@ def import_scene(path):
                   runtime_instances=sum(o.type == "EMPTY" for o in objects), materials=len(materials),
                   packed_images=sum(image.packed_file is not None for image in bpy.data.images),
                   redundant_or_degenerate_faces_removed=redundant_faces,
-                  maximum_transform_error=max_error, missing_images=missing_images)
+                  maximum_transform_error=max_error, missing_images=missing_images,
+                  untextured_visible_materials=untextured_visible_materials)
     (path.parent / "blender-scene-validation.json").write_text(json.dumps(report, indent=2))
     print("TRS_SCENE_IMPORT:", report)
     return root

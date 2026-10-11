@@ -91,7 +91,7 @@ public final class SceneExport {
     }
     static void marker(List<Map<String,Object>>parts,String source,String type,Object impl){parts.add(map("mesh",null,"matrix",identity(),"kind",type,"detail",source,"configuration",snapshot(impl,0)));}
     static void issue(String source,String reason){if(issueKeys.add(source+reason)){
-        boolean limitation=reason.startsWith("Runtime feature retained")||reason.startsWith("GUI text billboard retained");
+        boolean limitation=reason.startsWith("Runtime feature retained")||reason.startsWith("GUI text billboard retained")||reason.startsWith("Legacy static-set variant substituted");
         if(!limitation)errors++;
         issues.add(map("source",source,"reason",reason,"severity",limitation?"limitation":"error"));
     }}
@@ -202,6 +202,8 @@ public final class SceneExport {
             }
         }
         if(value instanceof String){String s=(String)value;if(s.matches("(?i).+\\.(png|jpg|jpeg|tga|dds)"))files.add(s);return;}
+        if(value instanceof Map){for(Object child:((Map<?,?>)value).values())textureFiles(child,files,visited,depth+1,mgr);return;}
+        if(refClass.isInstance(value)){textureFiles(f(value,"_arguments"),files,visited,depth+1,mgr);return;}
         if(value.getClass().isArray()){for(int i=0;i<Array.getLength(value);i++)textureFiles(Array.get(value,i),files,visited,depth+1,mgr);return;}
         if(!value.getClass().getName().startsWith("com.threerings"))return;
         for(Field field:value.getClass().getFields()){
@@ -209,7 +211,7 @@ public final class SceneExport {
             Object child=field.get(value);
             if(child!=null&&refClass.isInstance(child)&&field.getGenericType() instanceof ParameterizedType){
                 Type arg=((ParameterizedType)field.getGenericType()).getActualTypeArguments()[0];
-                if(arg instanceof Class && ((Class<?>)arg).getName().contains("TextureConfig")){
+                if(arg instanceof Class && (((Class<?>)arg).getName().contains("TextureConfig")||((Class<?>)arg).getName().contains("MaterialConfig"))){
                     try{child=resolve(mgr,(Class<?>)arg,child);}catch(Exception e){issue(name(child),cause(e).toString());continue;}
                 }
             }
@@ -289,8 +291,15 @@ public final class SceneExport {
             String type=impl.getClass().getSimpleName();modelKinds.merge(type,1,Integer::sum);
             if(type.equals("StaticConfig"))meshSet(f(impl,"meshes"),impl,mgr,source,identity(),parts);
             else if(type.equals("StaticSetConfig")){
-                Object set=((Map<?,?>)f(impl,"meshes")).get(f(impl,"model"));
-                if(set==null)throw new IOException("Static-set selection not found: "+f(impl,"model"));
+                Map<?,?>sets=(Map<?,?>)f(impl,"meshes");Object selected=f(impl,"model"),set=sets.get(selected);
+                if(set==null&&selected instanceof String){
+                    String substitute=((String)selected).replace("edge_thin_","edge_").replace("_Out_","_out_").replace("_In_","_in_");
+                    if(!substitute.equals(selected)&&sets.containsKey(substitute)){
+                        set=sets.get(substitute);
+                        issue(source,"Legacy static-set variant substituted: "+selected+" -> "+substitute);
+                    }
+                }
+                if(set==null)throw new IOException("Static-set selection not found: "+selected+" in "+source+"; available="+sets.keySet());
                 meshSet(set,impl,mgr,source,identity(),parts);
             }else if(type.equals("CompoundConfig")||type.equals("MergedStaticConfig")){
                 for(Object component:(Object[])f(impl,"models")){

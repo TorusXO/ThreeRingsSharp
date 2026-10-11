@@ -17,7 +17,7 @@ Choose one output folder for any number of exports. Each level or skybox uses it
 
 When a recognized name changes a source's prefix, a successful export removes that same source's older generic prefix files. The two catalog TSV files in `backend/` are needed for scene identification. They contain only names and hashes from the user's archived scene copies, not game assets.
 
-The level importer uses linked mesh datablocks for identical geometry/UVs/normals/vertex colors. Materials are linked to objects so differently colored instances can share geometry. Textures are deduplicated by decoded pixel content plus color-space interpretation, including differently encoded files. The validation report includes unique mesh/image counts and placement checks.
+The level importer uses linked mesh datablocks for identical geometry/UVs/normals/vertex colors. Materials are linked to objects so differently colored instances can share geometry. Textures are deduplicated by decoded pixel content plus color-space interpretation, including differently encoded files. The exporter follows nested material references to resolve diffuse images, including materials whose mesh labels use legacy `.psd` names. The validation report includes unique mesh/image counts, placement checks, and visible materials without resolved textures.
 
 ## Compatibility and scope
 
@@ -29,6 +29,8 @@ Old scene-global binary configs use a wrapper class that is abstract in current 
 
 Some archived scenes use a parameter-only `Environment/Model` global with a model argument and no default implementation. The native adapter exports that supplied model, including skybox geometry, while retaining the reference and selected arguments in JSON.
 
+Some archived Castle floor-edge tiles request an old `edge_thin_corner_Out_02` static-set key. If the installed game model contains `edge_corner_out_02`, that available geometry is used and recorded as a limitation in the scene report. The result is an approximation of the archived variant.
+
 Static geometry, native recoloring, vertex colors, alpha/additive materials and skybox geometry are implemented. Particle systems, procedural effects, GUI billboards, animated texture scrolling/atlases, engine fog, light sets, projected shadows and camera-follow behavior are not a complete Blender recreation of the game renderer. Unsupported runtime features remain named metadata objects and are reported as limitations. Resolution/geometry/material errors stop the pipeline. The game-specific shader conversions are approximations, not a pixel-identical renderer.
 
 ## Build and validate
@@ -36,7 +38,7 @@ Static geometry, native recoloring, vertex colors, alpha/additive materials and 
 `build.ps1` defaults to the installed Qt 6.11.2 MinGW kit, CMake, Ninja and JDK 21. It builds C++ Release, compiles the extension to Java 11 bytecode, deploys Qt and packages Python scripts and compatibility XML. The Java **runtime** must still support the installed game jars (Java 25 for the tested installation).
 
 ```powershell
-./qt/build.ps1 -Destination ./releases/ThreeRingsStudio-0.2.2-preview
+./qt/build.ps1 -Destination ./releases/ThreeRingsStudio-0.2.3-preview
 ```
 
 Override paths with `-QtDirectory`, `-QtToolsDirectory`, `-JdkDirectory`, `-BuildDirectory`, `-Destination`. Deployment writes `build-identity.json` with executable/backend hashes and source/build identity. Qt is dynamically linked; deployed license texts remain alongside the executable. The build does not compile or alter the legacy C# applications.
