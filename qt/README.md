@@ -44,7 +44,7 @@ Static geometry, native recoloring, vertex colors, alpha/additive materials and 
 `build.ps1` defaults to the installed Qt 6.11.2 MinGW kit, CMake, Ninja and JDK 21. It builds C++ Release, compiles the extension to Java 11 bytecode, deploys Qt and packages Python scripts and compatibility XML. The Java **runtime** must still support the installed game jars (Java 25 for the tested installation).
 
 ```powershell
-./qt/build.ps1 -Destination ./releases/ThreeRingsStudio-0.2.6-preview
+./qt/build.ps1 -Destination ./releases/ThreeRingsStudio-0.2.7-preview
 ```
 
 Override paths with `-QtDirectory`, `-QtToolsDirectory`, `-JdkDirectory`, `-BuildDirectory`, `-Destination`. Deployment writes `build-identity.json` with executable/backend hashes and source/build identity. Qt is dynamically linked; deployed license texts remain alongside the executable. The build does not compile or alter the legacy C# applications.

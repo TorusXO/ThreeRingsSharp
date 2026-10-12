@@ -21,6 +21,7 @@ public final class SceneExport {
     static final Map<String,Object> materials=new LinkedHashMap<>();
     static final Map<String,Object> placements=new LinkedHashMap<>();
     static final Map<String,LegacyAlias> legacyAliases=new LinkedHashMap<>();
+    static final Map<String,String> legacyRuntimeGlobals=new LinkedHashMap<>();
     static final Map<String,Integer> kinds=new TreeMap<>(), modelKinds=new TreeMap<>();
     static final Set<String> issueKeys=new HashSet<>();
     static int errors=0;
@@ -99,8 +100,17 @@ public final class SceneExport {
         return r;
     }
     static void marker(List<Map<String,Object>>parts,String source,String type,Object impl){parts.add(map("mesh",null,"matrix",identity(),"kind",type,"detail",source,"configuration",snapshot(impl,0)));}
+    static void writeScene(Path out,Map<String,Object>scene,Map<String,Object>report)throws IOException {
+        try{Files.writeString(out.resolve("scene.json"),KnightAnimationExport.json(scene));}
+        catch(IllegalArgumentException e){
+            issue("Scene serialization",e.getMessage());
+            Files.writeString(out.resolve("scene-report.json"),KnightAnimationExport.json(report));
+            throw new IOException("Scene data could not be serialized: "+e.getMessage()+"; see scene-report.json",e);
+        }
+        Files.writeString(out.resolve("scene-report.json"),KnightAnimationExport.json(report));
+    }
     static void issue(String source,String reason){if(issueKeys.add(source+reason)){
-        boolean limitation=reason.startsWith("Runtime feature retained")||reason.startsWith("GUI text billboard retained")||reason.startsWith("Legacy static-set variant substituted")||reason.startsWith("Legacy placeable represented by");
+        boolean limitation=reason.startsWith("Runtime feature retained")||reason.startsWith("GUI text billboard retained")||reason.startsWith("Legacy static-set variant substituted")||reason.startsWith("Legacy placeable represented by")||reason.startsWith("Invalid source normals repaired");
         if(!limitation)errors++;
         issues.add(map("source",source,"reason",reason,"severity",limitation?"limitation":"error"));
     }}
@@ -160,6 +170,8 @@ public final class SceneExport {
                 legacyAliases.put(aliasName,new LegacyAlias(targetName,importedReference(target),xml(entry)));
                 object.removeChild(entry);continue;
             }
+            if(implementation!=null&&implementation.getAttribute("class").startsWith("com.threerings.projectx.dungeon."))
+                legacyRuntimeGlobals.put(child(entry,"name").getTextContent().trim(),xml(entry));
             if(implementation==null||!(implementation.getAttribute("class").equals("com.threerings.tudey.config.SceneGlobalConfig$EnvironmentModel")||implementation.getAttribute("class").equals("com.threerings.tudey.config.SceneGlobalConfig$Camera"))){object.removeChild(entry);continue;}
             entry.setAttribute("class",implementation.getAttribute("class"));
             while(implementation.hasChildNodes())entry.appendChild(implementation.getFirstChild());
@@ -181,6 +193,35 @@ public final class SceneExport {
         float[][]result=new float[count][size];
         for(int i=0;i<count;i++)for(int j=0;j<size;j++)result[i][j]=buf.get(offset+i*stride+j);
         return result;
+    }
+    static int[] repairNormals(float[][]positions,float[][]normals,List<int[]>faces,String source)throws IOException {
+        if(normals==null)return new int[]{0,0};
+        for(int vertex=0;vertex<positions.length;vertex++)for(int axis=0;axis<positions[vertex].length;axis++)
+            if(!Float.isFinite(positions[vertex][axis]))throw new IOException("Nonfinite position in "+source+" vertex "+vertex+" axis "+axis);
+        int repaired=0,fallbacks=0;
+        double[][]sum=new double[normals.length][3];
+        for(int[]face:faces)for(int corner=1;corner+1<face.length;corner++){
+            int a=face[0],b=face[corner],c=face[corner+1];
+            float[]pa=positions[a],pb=positions[b],pc=positions[c];
+            double ux=pb[0]-pa[0],uy=pb[1]-pa[1],uz=pb[2]-pa[2];
+            double vx=pc[0]-pa[0],vy=pc[1]-pa[1],vz=pc[2]-pa[2];
+            double[]normal={uy*vz-uz*vy,uz*vx-ux*vz,ux*vy-uy*vx};
+            if(!Double.isFinite(normal[0])||!Double.isFinite(normal[1])||!Double.isFinite(normal[2]))continue;
+            for(int vertex:new int[]{a,b,c})for(int axis=0;axis<3;axis++)sum[vertex][axis]+=normal[axis];
+        }
+        for(int vertex=0;vertex<normals.length;vertex++){
+            boolean invalid=false;
+            for(float component:normals[vertex])if(!Float.isFinite(component))invalid=true;
+            if(!invalid)continue;
+            double[]normal=sum[vertex];
+            double length=Math.sqrt(normal[0]*normal[0]+normal[1]*normal[1]+normal[2]*normal[2]);
+            if(length>1e-20&&Double.isFinite(length))for(int axis=0;axis<3;axis++)normals[vertex][axis]=(float)(normal[axis]/length);
+            else { // A zero-area triangle has no geometric normal; its direction cannot affect a visible face.
+                normals[vertex][0]=0;normals[vertex][1]=0;normals[vertex][2]=1;fallbacks++;
+            }
+            repaired++;
+        }
+        return new int[]{repaired,fallbacks};
     }
     static void textureFiles(Object value,Set<String> files,Set<Object> visited,int depth,Object mgr)throws Exception {
         if(value==null||depth>16||!visited.add(value))return;
@@ -310,6 +351,8 @@ public final class SceneExport {
         else if(mode.equals("QUADS")){for(int i=0;i+3<indices.length;i+=4)faces.add(new int[]{indices[i],indices[i+1],indices[i+2],indices[i+3]});}
         else throw new IOException("Unsupported geometry mode "+mode);
         for(int[]face:faces)for(int v:face)if(v<0||v>=count)throw new IOException("Vertex index out of bounds");
+        int[] repaired=repairNormals(positions,normals,faces,source);
+        if(repaired[0]>0)issue(source,"Invalid source normals repaired for "+repaired[0]+" vertices in mesh "+meshes.size()+" ("+repaired[1]+" zero-area fallbacks)");
         int id=meshes.size();meshIds.put(key,id);
         meshes.add(map("name",source+"/"+f(visible,"texture"),"positions",positions,"normals",normals,"uv",uv,"colors",array(opt(geometry,"colorArray"),count),"faces",faces,"material",mat));
         return id;
@@ -341,6 +384,11 @@ public final class SceneExport {
                 Map<?,?>sets=(Map<?,?>)f(impl,"meshes");Object selected=f(impl,"model"),set=sets.get(selected);
                 if(set==null&&selected instanceof String){
                     String substitute=((String)selected).replace("edge_thin_","edge_").replace("_Out_","_out_").replace("_In_","_in_");
+                    if(source.equals("world/prop/natural/trees/wildwoods/canopyshadow_set.dat")){
+                        // The archived _01/_02 decals match the two small variants in the legacy placeable catalog.
+                        if(selected.equals("canopy_shadow_01"))substitute="canopyShadow_small_01";
+                        else if(selected.equals("canopy_shadow_02"))substitute="canopyShadow_small_02";
+                    }
                     if(!substitute.equals(selected)&&sets.containsKey(substitute)){
                         set=sets.get(substitute);
                         issue(source,"Legacy static-set variant substituted: "+selected+" -> "+substitute);
@@ -425,8 +473,7 @@ public final class SceneExport {
             Object reference=refClass.getConstructor(String.class).newInstance(source);
             for(Map<String,Object>part:asset(reference,root,new HashSet<>()))instances.add(map("entry",0,"type","Model","model",source,"reference",source,"mesh",part.get("mesh"),"matrix",part.get("matrix"),"skybox",part.get("skybox"),"kind",part.get("kind"),"detail",part.get("detail"),"configuration",part.get("configuration")));
             Files.createDirectories(out);
-            Files.writeString(out.resolve("scene.json"),KnightAnimationExport.json(map("format","trs-scene-1","name",source,"source",scenePath.toString(),"resourceDirectory",rsrc.toString(),"meshes",meshes,"materials",materials,"instances",instances,"metadata",metadata)));
-            Files.writeString(out.resolve("scene-report.json"),KnightAnimationExport.json(map("meshCount",meshes.size(),"instanceCount",instances.size(),"issues",issues)));
+            writeScene(out,map("format","trs-scene-1","name",source,"source",scenePath.toString(),"resourceDirectory",rsrc.toString(),"meshes",meshes,"materials",materials,"instances",instances,"metadata",metadata),map("meshCount",meshes.size(),"instanceCount",instances.size(),"issues",issues));
             if(meshes.isEmpty())throw new IOException("No mesh geometry resolved; see scene-report.json for runtime-only effects");
             if(errors>0)throw new IOException("Export contains "+errors+" unresolved errors; see scene-report.json");
             System.out.println("Model export: "+meshes.size()+" meshes, "+instances.size()+" instances.");return;
@@ -449,6 +496,12 @@ public final class SceneExport {
                     Object original=entry.getClass().getMethod("az",cm).invoke(entry,manager);
                     LegacyAlias alias=legacyAliases.get(name(reference));
                     Map<?,?> selected=(Map<?,?>)f(reference,"_arguments");
+                    String runtimeDefinition=legacyRuntimeGlobals.get(name(reference));
+                    if(runtimeDefinition!=null){
+                        metadata.add(map("id",id,"type",kind,"reference",String.valueOf(reference),"selectedArguments",snapshot(selected,0),"legacyDefinitionXml",runtimeDefinition,"reason","legacy dungeon scene-global is runtime metadata"));
+                        issue("Entry "+id+" GlobalEntry","Runtime feature retained as metadata: legacy dungeon scene-global "+name(reference));
+                        continue;
+                    }
                     Object parameterModel=selected.get("Model");
                     boolean directModel=original==Class.forName("com.threerings.tudey.config.SceneGlobalConfig").getField("bSl").get(null)
                         &&name(reference).equals("Environment/Model")&&refClass.isInstance(parameterModel);
@@ -487,8 +540,7 @@ public final class SceneExport {
             if(id%2000==0)System.out.println("Read "+id+" / "+entries.size()+" entries");
         }
         Files.createDirectories(out);
-        Files.writeString(out.resolve("scene.json"),KnightAnimationExport.json(map("format","trs-scene-1","name",displayName,"internalName",internalName,"sceneId",sceneId,"nameSource",nameSource,"source",scenePath.toString(),"resourceDirectory",rsrc.toString(),"meshes",meshes,"materials",materials,"instances",instances,"placements",placements,"metadata",metadata)));
-        Files.writeString(out.resolve("scene-report.json"),KnightAnimationExport.json(map("name",displayName,"internalName",internalName,"sceneId",sceneId,"nameSource",nameSource,"source",scenePath.toString(),"entryCount",entries.size(),"entryKinds",kinds,"visualEntries",visualEntries,"emptyEntries",emptyEntries,"meshCount",meshes.size(),"instanceCount",instances.size(),"modelKinds",modelKinds,"issues",issues)));
+        writeScene(out,map("format","trs-scene-1","name",displayName,"internalName",internalName,"sceneId",sceneId,"nameSource",nameSource,"source",scenePath.toString(),"resourceDirectory",rsrc.toString(),"meshes",meshes,"materials",materials,"instances",instances,"placements",placements,"metadata",metadata),map("name",displayName,"internalName",internalName,"sceneId",sceneId,"nameSource",nameSource,"source",scenePath.toString(),"entryCount",entries.size(),"entryKinds",kinds,"visualEntries",visualEntries,"emptyEntries",emptyEntries,"meshCount",meshes.size(),"instanceCount",instances.size(),"modelKinds",modelKinds,"issues",issues));
         System.out.println("Scene export: "+meshes.size()+" mesh definitions, "+instances.size()+" instances, "+issues.size()+" issues.");
         if(errors>0)throw new IOException("Export contains "+errors+" unresolved errors; see scene-report.json");
     }

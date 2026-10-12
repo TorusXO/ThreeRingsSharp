@@ -90,7 +90,8 @@ public final class KnightAnimationExport {
             "skipLastFrame",field(impl,"skipLastFrame"),"targets",targets,"frames",samples,
             "transition",field(impl,"transition"),"sourceType",impl.getClass().getName(),"ignoredTargets",missing);
     }
-    static String json(Object value) {
+    static String json(Object value) { return json(value,"$"); }
+    static String json(Object value,String path) {
         if(value==null)return "null";
         if(value instanceof String) {
             StringBuilder b=new StringBuilder("\"");
@@ -101,18 +102,18 @@ public final class KnightAnimationExport {
             return b.append('"').toString();
         }
         if(value instanceof Number) {
-            if(!Double.isFinite(((Number)value).doubleValue()))throw new IllegalArgumentException("Nonfinite value");
+            if(!Double.isFinite(((Number)value).doubleValue()))throw new IllegalArgumentException("Nonfinite value "+value+" at "+path);
             return value.toString();
         }
         if(value instanceof Boolean)return value.toString();
         if(value instanceof Map) {
             List<String> parts=new ArrayList<>();
-            ((Map<?,?>)value).forEach((k,v)->parts.add(json(k.toString())+":"+json(v)));
+            ((Map<?,?>)value).forEach((k,v)->parts.add(json(k.toString())+":"+json(v,path+"."+k)));
             return "{"+String.join(",",parts)+"}";
         }
         List<String> parts=new ArrayList<>();
-        if(value instanceof Iterable) for(Object o:(Iterable<?>)value) parts.add(json(o));
-        else if(value.getClass().isArray()) for(int i=0;i<Array.getLength(value);i++)parts.add(json(Array.get(value,i)));
+        if(value instanceof Iterable) {int i=0;for(Object o:(Iterable<?>)value)parts.add(json(o,path+"["+(i++)+"]"));}
+        else if(value.getClass().isArray()) for(int i=0;i<Array.getLength(value);i++)parts.add(json(Array.get(value,i),path+"["+i+"]"));
         else throw new IllegalArgumentException("Cannot serialize "+value.getClass());
         return "["+String.join(",",parts)+"]";
     }
