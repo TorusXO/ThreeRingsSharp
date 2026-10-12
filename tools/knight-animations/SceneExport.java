@@ -458,7 +458,7 @@ public final class SceneExport {
         }finally{stack.remove(key);}
     }
     public static void main(String[]args)throws Exception {
-        if(args.length<3||args.length>7)throw new IllegalArgumentException("Usage: SceneExport <rsrc> <scene-file> <new-output-dir> [legacy-scene-global.xml] [display-name scene-id match-method]");
+        if(args.length<3||args.length>64)throw new IllegalArgumentException("Usage: SceneExport <rsrc> <scene-or-model-file> <new-output-dir> [legacy-scene-global.xml] [scene-name scene-id match-method | model-parameter=value ...]");
         if(args.length>=4&&!args[3].isEmpty())legacyGlobals=Paths.get(args[3]);
         String displayName=args.length>=5?args[4]:"",sceneId=args.length>=6?args[5]:"",nameSource=args.length>=7?args[6]:"";
         Path rsrc=Paths.get(args[0]).toAbsolutePath(),scenePath=Paths.get(args[1]).toAbsolutePath(),out=Paths.get(args[2]).toAbsolutePath();
@@ -471,6 +471,11 @@ public final class SceneExport {
             if(!scenePath.startsWith(rsrc))throw new IOException("Model must be inside the resource directory");
             String source=rsrc.relativize(scenePath).toString().replace('\\','/');
             Object reference=refClass.getConstructor(String.class).newInstance(source);
+            for(int i=4;i<args.length;i++){
+                int separator=args[i].indexOf('=');
+                if(separator<=0)throw new IllegalArgumentException("Model parameter must be name=value: "+args[i]);
+                ((Map)f(reference,"_arguments")).put(args[i].substring(0,separator),args[i].substring(separator+1));
+            }
             for(Map<String,Object>part:asset(reference,root,new HashSet<>()))instances.add(map("entry",0,"type","Model","model",source,"reference",source,"mesh",part.get("mesh"),"matrix",part.get("matrix"),"skybox",part.get("skybox"),"kind",part.get("kind"),"detail",part.get("detail"),"configuration",part.get("configuration")));
             Files.createDirectories(out);
             writeScene(out,map("format","trs-scene-1","name",source,"source",scenePath.toString(),"resourceDirectory",rsrc.toString(),"meshes",meshes,"materials",materials,"instances",instances,"metadata",metadata),map("meshCount",meshes.size(),"instanceCount",instances.size(),"issues",issues));

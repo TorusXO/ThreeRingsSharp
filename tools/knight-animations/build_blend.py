@@ -12,12 +12,13 @@ from import_scene_blender import import_scene
 from rename_ue_bones import rename
 
 parser = argparse.ArgumentParser()
-parser.add_argument("mode", choices=["animation", "scene", "skybox"])
+parser.add_argument("mode", choices=["animation", "scene", "skybox", "model"])
 parser.add_argument("bundle")
 parser.add_argument("destination")
 parser.add_argument("--logical-bundle", help="Final named JSON path after the staged export is published")
 parser.add_argument("--ue-names", action="store_true")
 parser.add_argument("--fbx", action="store_true")
+parser.add_argument("--glb", action="store_true", help="Export selected model as a single glTF binary")
 parser.add_argument("--color-node", help="Optional .blend library containing ColorReplacementNode")
 args = parser.parse_args(sys.argv[sys.argv.index("--") + 1:])
 destination = Path(args.destination).resolve()
@@ -39,6 +40,10 @@ else:
         root["trs_bundle"] = str(Path(args.logical_bundle).resolve())
 if args.mode == "animation" and args.logical_bundle:
     rig["trs_source_bundle"] = str(Path(args.logical_bundle).resolve())
+if args.glb:
+    if args.mode != "model":
+        raise ValueError("GLB export is available for selected models")
+    bpy.ops.export_scene.gltf(filepath=str(destination.with_suffix(".glb")), export_format="GLB", export_apply=False)
 if args.logical_bundle:
     staged = str(Path(args.bundle).resolve().parent)
     published = str(Path(args.logical_bundle).resolve().parent)

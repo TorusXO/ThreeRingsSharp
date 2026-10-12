@@ -1,17 +1,18 @@
 # ThreeRings Studio — Qt preview
 
-Qt 6/C++ frontend for the new native-game animation and scene export extensions. The original C# / IKVM backend is unchanged. **Open original model exporter** launches the existing SKAnimatorTools installation; its old model browsing/export interface has not been ported into Qt. Animation, selected archived level, and skybox export run directly from the new Qt interface.
+Qt 6/C++ frontend for native-game model, animation, selected-level, and skybox export. The original C# / IKVM backend is unchanged. The Models tab brings path search, config inspection, static-set variant and Choice parameter selection, hierarchy inspection, and selected-model export into Qt.
 
 ## Run
 
-Keep the deployed application folder together, including Qt DLLs, `platforms/` and `backend/`. Run `ThreeRingsStudio.exe`. No compiler is needed to use a packaged build.
+Keep the portable application folder together, including `runtime/`, `tools/blender/`, Qt DLLs, `platforms/`, and `backend/`. Run `ThreeRingsStudio.exe`. The portable release includes Java 25 and Blender 4.2 LTS; no separate installation or compiler is needed.
 
-Set the game installation and a **Blender 4.2 LTS** executable. Leave Java blank to use the installed game runtime. If an upgraded runtime contains obsolete Java 8 `lib/ext` files, the app copies the runtime into its own cache excluding those files; the game installation is never modified. A compatible Java executable can also be selected explicitly.
+Choose only the Spiral Knights installation, one reused output folder, and the folder containing saved scenes/levels. Advanced command-line overrides of Blender and Java paths remain for development and testing. An unbundled development build can also use the game's Java runtime, copying it into an app cache when obsolete `lib/ext` files would prevent startup.
 
+- **Models:** scan or choose a game model `.dat`, filter paths, inspect the model hierarchy and source parameters, select a static-set variant or Choice values, then export a packed `.blend` and optionally a `.glb`. Preview in Blender exports the selected model and opens its `.blend`. The experimental SpiralView launcher uses the open-source viewer and bundled LWJGL 2 support; with the tested current game build it exits due to a viewer/game library mismatch. Its `<model prefix>.spiralview.log` and the game's `viewer.log` record startup errors. Model export currently includes visible static geometry and textures; articulated model rigs, skinning, animation tracks and effect systems are not yet preserved in model-mode `.glb` files. The dedicated Knight animations tab exports the supported animation tracks separately.
 - **Knight animations:** exports all supported stored clips as Actions. Anatomical UE names are enabled by default, checked against the supplied reference rig. This preserves the 49-node SK hierarchy; it does not retarget onto the reference's 88-bone skeleton. Optional FBX export has a known weapon-helper discrepancy; use the `.blend` as the authoritative result.
 - **Levels:** choose an SKSA archive directory, scan/filter it, select a scene, then export. Extensionless scene files and `.dat` files are listed; a non-scene file is rejected by the backend. The level list identifies numeric files and exact content matches against the supplied 205-name scene catalog. The Blender collection, reports and output filename use the recognized name; JSON also retains the scene's internal name, original path, catalog ID and match method. Unmatched scenes retain their source filename. The catalog is user-supplied archive data and may contain historical names or uncertainty notes.
 - **Skyboxes:** scan the game's skybox directory or choose a wrapper/model `.dat`. Skybox geometry uses unlit materials, independent transforms, and recorded camera-parallax settings. Parallax scale is never applied as mesh scale.
-- **Optional color node:** select the user's `Color_Replacement_Node.blend` to append `ColorReplacementNode` as a local editable group. It is available through the Shader Editor's Add → Group menu. The default materials already use native game recoloring; the optional group is not automatically inserted into their links.
+The portable build carries the supplied `Color_Replacement_Node.blend` and appends `ColorReplacementNode` as a local editable group. It is available through the Shader Editor's Add → Group menu. The default materials already use native game recoloring; the optional group is not automatically inserted into their links.
 
 Choose one output folder for any number of exports. Each level or skybox uses its source name plus a short path hash in every filename; knight animations have their own prefix. JSON data, reports, logs, FBX files, generated recolored textures and packed `.blend` files all live directly in that folder. Re-exporting the same source replaces its named files and log, while exports from other sources and unrelated files remain. Recolored PNGs use content hashes so identical textures can be reused. A temporary staging folder is removed after each run. If an export fails, its previous completed `.blend` remains available and its named log and `last-failed-report.json` explain the failure.
 
@@ -25,7 +26,7 @@ Materials named `Sphere Overlay/Additive Mask` keep their ordinary textured base
 
 ## Compatibility and scope
 
-The native extension resolves configs using the locally installed game jars, without redistributing them. Reflection entrypoints currently target the tested installed game; an upstream obfuscation change can require adapting the adapter. No game assets or runtime are included in Git.
+The native extension resolves configs using the locally installed game jars, without redistributing them. Reflection entrypoints currently target the tested installed game; an upstream obfuscation change can require adapting the adapter. No game assets or runtime are included in Git. The portable release bundles the independently redistributable Blender, Eclipse Temurin JRE, SpiralView and LWJGL 2 dependencies with their license notices; the user still supplies the installed game's own files. SpiralView's current released viewer remains incompatible with the tested game libraries, so Blender preview is the working model preview path.
 
 The current installation lacks `rsrc/config/placeable.dat`. If present, the existing `placeable_projectx.dat` in the game directory is loaded as a fallback. Missing configs are errors, not successful placeholder geometry.
 
@@ -41,10 +42,11 @@ Static geometry, native recoloring, vertex colors, alpha/additive materials and 
 
 ## Build and validate
 
-`build.ps1` defaults to the installed Qt 6.11.2 MinGW kit, CMake, Ninja and JDK 21. It builds C++ Release, compiles the extension to Java 11 bytecode, deploys Qt and packages Python scripts and compatibility XML. The Java **runtime** must still support the installed game jars (Java 25 for the tested installation).
+`build.ps1` defaults to the installed Qt 6.11.2 MinGW kit, CMake, Ninja and JDK 21. It builds C++ Release, compiles the extension to Java 11 bytecode, deploys Qt and packages Python scripts and compatibility XML. `package-portable.ps1` then copies Blender 4.2 LTS, a Java 25 JRE, SpiralView, LWJGL 2 jars/native DLLs, and the color node into the deploy folder. It can produce a ZIP. Use upstream redistributable downloads and retain the license notices; do not add binaries or game jars to Git.
 
 ```powershell
-./qt/build.ps1 -Destination ./releases/ThreeRingsStudio-0.2.7-preview
+./qt/build.ps1 -Destination ./releases/ThreeRingsStudio-0.3.0-preview
+./qt/package-portable.ps1 -ClientDirectory ./releases/ThreeRingsStudio-0.3.0-preview -BlenderDirectory C:/path/to/blender-4.2.9-windows-x64 -JavaRuntimeDirectory C:/path/to/jdk-25-jre -SpiralViewJar C:/path/to/spiralview.jar -Lwjgl2Directory C:/path/to/lwjgl2 -ColorNodeBlend 'C:/path/to/Color_Replacement_Node.blend' -CreateZip
 ```
 
 Override paths with `-QtDirectory`, `-QtToolsDirectory`, `-JdkDirectory`, `-BuildDirectory`, `-Destination`. Deployment writes `build-identity.json` with executable/backend hashes and source/build identity. Qt is dynamically linked; deployed license texts remain alongside the executable. The build does not compile or alter the legacy C# applications.
@@ -55,7 +57,7 @@ The same QProcess pipeline supports batch validation:
 ./ThreeRingsStudio.exe --batch scene --game 'C:/Games/Spiral Knights' --source 'C:/SKSA/scenes/haven_town_square_origin' --blender 'C:/Blender/blender.exe' --output 'C:/Exports/TRS'
 ```
 
-`--batch animation|scene|skybox`; optional `--java`, `--globals`, `--source-names`, `--fbx`, `--color-node`. Exit 0 means a `.blend` was created, with any reported limitations; exit 1 means failure/cancellation. `--screenshot` captures the Qt window for local layout inspection. `--cancel-after-ms` exercises cancellation in batch regression checks. UI path preferences persist in QSettings; an optional local `paths.json` supplies initial defaults for a particular machine.
+`--batch animation|model|scene|skybox`; optional `--java`, `--blender`, `--globals`, `--source-names`, `--fbx`, `--color-node`, `--glb`, `--model-variant`. Exit 0 means a `.blend` was created, with any reported limitations; exit 1 means failure/cancellation. `--screenshot` captures the Qt window for local layout inspection. `--cancel-after-ms` exercises cancellation in batch regression checks. UI folder preferences persist in QSettings; an optional local `paths.json` supplies initial defaults for a particular machine.
 
 `test-client.ps1` checks failure handling in a reusable folder, invalid scenes, failed process startup and cancellation. Run `test_scene_blender.py` with Blender `--background --factory-startup --python-exit-code 1 --python` for mesh/material/UV/color/image deduplication regression checks. `validate_blender.py` checks animation poses against source matrices, including renamed rigs.
 

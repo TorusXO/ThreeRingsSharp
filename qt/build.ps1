@@ -16,7 +16,7 @@ if ($LASTEXITCODE) { throw 'CMake configuration failed' }
 & $cmake --build $build
 if ($LASTEXITCODE) { throw 'C++ build failed' }
 New-Item -ItemType Directory -Force "$dest/backend", "$build/java" | Out-Null
-& "$JdkDirectory/bin/javac.exe" --release 11 -d "$build/java" "$repo/tools/knight-animations/KnightAnimationExport.java" "$repo/tools/knight-animations/SceneExport.java"
+& "$JdkDirectory/bin/javac.exe" --release 11 -d "$build/java" "$repo/tools/knight-animations/KnightAnimationExport.java" "$repo/tools/knight-animations/SceneExport.java" "$repo/tools/knight-animations/ModelInspect.java"
 if ($LASTEXITCODE) { throw 'Java helper compilation failed' }
 & "$JdkDirectory/bin/jar.exe" --create --file "$dest/backend/trs-export.jar" -C "$build/java" .
 if ($LASTEXITCODE) { throw 'Backend packaging failed' }
@@ -31,7 +31,7 @@ Copy-Item -LiteralPath "$repo/LICENSE" -Destination "$dest/LICENSE-ThreeRingsSha
 Copy-Item -LiteralPath "$PSScriptRoot/README.md" -Destination "$dest/README.md"
 if (Test-Path "$QtDirectory/../../Licenses") { Copy-Item "$QtDirectory/../../Licenses" "$dest/Qt-Licenses" -Recurse -Force }
 $identity = [ordered]@{
-    version = '0.2.7-preview'; profile = 'Release / Qt 6 / MinGW x64'; builtUtc = [DateTime]::UtcNow.ToString('o')
+    version = '0.3.0-preview'; profile = 'Release / Qt 6 / MinGW x64'; builtUtc = [DateTime]::UtcNow.ToString('o')
     qtVersion = (& "$QtDirectory/bin/qmake.exe" -query QT_VERSION)
     commit = (& git -C $repo rev-parse HEAD); sourceDirty = [bool](& git -C $repo status --porcelain)
     executableSha256 = (Get-FileHash "$dest/ThreeRingsStudio.exe" -Algorithm SHA256).Hash
