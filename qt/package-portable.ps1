@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory=$true)][string]$BlenderDirectory,
     [Parameter(Mandatory=$true)][string]$JavaRuntimeDirectory,
     [Parameter(Mandatory=$true)][string]$SpiralViewJar,
-    [Parameter(Mandatory=$true)][string]$Lwjgl2Directory,
+    [string]$JdkDirectory = 'C:/Program Files/Android/openjdk/jdk-21.0.8',
+    [string]$ClydeJar,
     [string]$ColorNodeBlend,
     [switch]$CreateZip
 )
@@ -13,13 +14,11 @@ $client = [IO.Path]::GetFullPath($ClientDirectory)
 $blender = [IO.Path]::GetFullPath($BlenderDirectory)
 $runtime = [IO.Path]::GetFullPath($JavaRuntimeDirectory)
 $viewer = [IO.Path]::GetFullPath($SpiralViewJar)
-$lwjgl = [IO.Path]::GetFullPath($Lwjgl2Directory)
 foreach ($file in @("$client/ThreeRingsStudio.exe", "$blender/blender.exe", "$runtime/bin/java.exe", $viewer)) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Portable package input is missing: $file" }
 }
-foreach ($file in @("$lwjgl/lwjgl-2.9.3.jar", "$lwjgl/lwjgl_util-2.9.3.jar", "$lwjgl/native/lwjgl64.dll")) {
-    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "SpiralView dependency is missing: $file" }
-}
+$javac = Join-Path ([IO.Path]::GetFullPath($JdkDirectory)) 'bin/javac.exe'
+if (-not (Test-Path -LiteralPath $javac -PathType Leaf)) { throw "JDK compiler is missing: $javac" }
 function Copy-Tree([string]$Source, [string]$Target) {
     New-Item -ItemType Directory -Force -Path $Target | Out-Null
     & "$env:SystemRoot/System32/robocopy.exe" $Source $Target /E /XF '*.pdb' /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
@@ -27,12 +26,29 @@ function Copy-Tree([string]$Source, [string]$Target) {
 }
 Copy-Tree $blender "$client/tools/blender"
 Copy-Tree $runtime "$client/runtime"
-Copy-Item -LiteralPath $viewer -Destination "$client/backend/spiralview.jar" -Force
+$buildDeps = Join-Path $repo '.local/package-dependencies'
+New-Item -ItemType Directory -Force $buildDeps | Out-Null
+if (-not $ClydeJar) {
+    $ClydeJar = Join-Path $buildDeps 'clyde-1.2.1.jar'
+    if (-not (Test-Path -LiteralPath $ClydeJar -PathType Leaf)) {
+        Invoke-WebRequest -Uri 'https://repo1.maven.org/maven2/com/threerings/clyde/1.2.1/clyde-1.2.1.jar' -OutFile $ClydeJar
+    }
+}
+$ClydeJar = [IO.Path]::GetFullPath($ClydeJar)
+$expectedClydeSha256 = '02036ABF69BB8462FCAD27ECD0397719B8EF09B0E5405207F732C301E9C05875'
+if ((Get-FileHash $ClydeJar -Algorithm SHA256).Hash -ne $expectedClydeSha256) {
+    throw "Clyde 1.2.1 archive has an unexpected SHA256: $ClydeJar"
+}
+$compat = Join-Path $buildDeps 'spiralview-compat'
+New-Item -ItemType Directory -Force "$compat/classes" | Out-Null
+python "$PSScriptRoot/patch_spiralview.py" prepare-classpath $viewer "$compat/compiler-classpath.jar"
+if ($LASTEXITCODE) { throw 'Could not prepare the SpiralView compatibility classpath' }
+& $javac --release 21 -cp "$compat/compiler-classpath.jar" -d "$compat/classes" "$PSScriptRoot/spiralview-compat/com/threerings/config/ConfigGroup.java"
+if ($LASTEXITCODE) { throw 'Could not compile the SpiralView compatibility class' }
+python "$PSScriptRoot/patch_spiralview.py" build $viewer $ClydeJar "$compat/classes/com/threerings/config/ConfigGroup.class" "$client/backend/spiralview.jar"
+if ($LASTEXITCODE) { throw 'Could not package the SpiralView compatibility layer' }
 Copy-Item -LiteralPath "$PSScriptRoot/third-party/spiralview-LICENSE.txt" -Destination "$client/backend/spiralview-LICENSE.txt" -Force
-New-Item -ItemType Directory -Force "$client/backend/lwjgl2", "$client/backend/preview-native" | Out-Null
-Copy-Item -LiteralPath "$lwjgl/lwjgl-2.9.3.jar", "$lwjgl/lwjgl_util-2.9.3.jar" -Destination "$client/backend/lwjgl2" -Force
-Get-ChildItem -LiteralPath "$lwjgl/native" -Filter '*.dll' | Copy-Item -Destination "$client/backend/preview-native" -Force
-Copy-Item -LiteralPath "$PSScriptRoot/third-party/lwjgl2-LICENSE.txt" -Destination "$client/backend/lwjgl2-LICENSE.txt" -Force
+Copy-Item -LiteralPath "$PSScriptRoot/third-party/clyde-LICENSE.txt" -Destination "$client/backend/clyde-LICENSE.txt" -Force
 if ($ColorNodeBlend) {
     Copy-Item -LiteralPath ([IO.Path]::GetFullPath($ColorNodeBlend)) -Destination "$client/backend/Color_Replacement_Node.blend" -Force
 }

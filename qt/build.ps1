@@ -9,6 +9,14 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $build = [IO.Path]::GetFullPath($BuildDirectory)
 $dest = [IO.Path]::GetFullPath($Destination)
+function Remove-ManagedDestinationChild([string]$RelativePath) {
+    $root = $dest.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $target = [IO.Path]::GetFullPath((Join-Path $root $RelativePath))
+    if (-not $target.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to remove a path outside the release directory: $target"
+    }
+    if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
+}
 $env:PATH = "$QtToolsDirectory/mingw1310_64/bin;$QtDirectory/bin;" + $env:PATH
 $cmake = "$QtToolsDirectory/CMake_64/bin/cmake.exe"
 & $cmake -S $PSScriptRoot -B $build -G Ninja "-DCMAKE_MAKE_PROGRAM=$QtToolsDirectory/Ninja/ninja.exe" "-DCMAKE_PREFIX_PATH=$QtDirectory" -DCMAKE_BUILD_TYPE=Release
@@ -16,6 +24,9 @@ if ($LASTEXITCODE) { throw 'CMake configuration failed' }
 & $cmake --build $build
 if ($LASTEXITCODE) { throw 'C++ build failed' }
 New-Item -ItemType Directory -Force "$dest/backend", "$build/java" | Out-Null
+foreach ($stale in @('backend/lwjgl2', 'backend/preview-native', 'backend/lwjgl2-LICENSE.txt', 'backend/__pycache__')) {
+    Remove-ManagedDestinationChild $stale
+}
 & "$JdkDirectory/bin/javac.exe" --release 11 -d "$build/java" "$repo/tools/knight-animations/KnightAnimationExport.java" "$repo/tools/knight-animations/SceneExport.java" "$repo/tools/knight-animations/ModelInspect.java"
 if ($LASTEXITCODE) { throw 'Java helper compilation failed' }
 & "$JdkDirectory/bin/jar.exe" --create --file "$dest/backend/trs-export.jar" -C "$build/java" .
@@ -31,7 +42,7 @@ Copy-Item -LiteralPath "$repo/LICENSE" -Destination "$dest/LICENSE-ThreeRingsSha
 Copy-Item -LiteralPath "$PSScriptRoot/README.md" -Destination "$dest/README.md"
 if (Test-Path "$QtDirectory/../../Licenses") { Copy-Item "$QtDirectory/../../Licenses" "$dest/Qt-Licenses" -Recurse -Force }
 $identity = [ordered]@{
-    version = '0.3.0-preview'; profile = 'Release / Qt 6 / MinGW x64'; builtUtc = [DateTime]::UtcNow.ToString('o')
+    version = '0.3.1-preview'; profile = 'Release / Qt 6 / MinGW x64'; builtUtc = [DateTime]::UtcNow.ToString('o')
     qtVersion = (& "$QtDirectory/bin/qmake.exe" -query QT_VERSION)
     commit = (& git -C $repo rev-parse HEAD); sourceDirty = [bool](& git -C $repo status --porcelain)
     executableSha256 = (Get-FileHash "$dest/ThreeRingsStudio.exe" -Algorithm SHA256).Hash

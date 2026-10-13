@@ -66,6 +66,36 @@ to this rig or retarget these Actions to your destination armature. Renaming bon
 alone does not convert the rig to the UE5 mannequin: rest poses, bone axes,
 proportions, root motion, and hand/foot chains need retargeting.
 
+## Retarget onto an existing UE-style character
+
+The Qt animation tab accepts a rigged character `.blend` and runs
+`retarget_ue.py` after exporting the source Actions. The script bakes matching SK
+motion onto the character's own armature, preserving its 88-bone rest pose,
+hierarchy, mesh geometry, and existing weights. For the supplied DoubleBelt
+character, all 150 Actions are baked and the two weighted legacy belt groups
+absent from the UE armature are reassigned to `pelvis` in the new output copy.
+Extra spine, neck, twist, finger, toe and IK bones inherit or interpolate motion
+from their available SK counterparts. These extra bones cannot reproduce
+independent motion that the 49-bone SK rig never stored.
+
+The standalone command opens the destination character and saves a new file:
+
+```powershell
+blender --background 'Z:/path/to/DoubleBelt.blend' --python-exit-code 1 `
+  --python tools/knight-animations/retarget_ue.py -- `
+  'E:/exports/knight/animation-knight-animations.blend' `
+  'E:/exports/knight/DoubleBelt-UE-Retargeted.blend' `
+  'E:/exports/knight/DoubleBelt-UE-retarget-report.json'
+```
+
+Add `--fbx-directory E:/exports/knight/ue-fbx` to write one skeletal mesh FBX
+plus FBX animation clips; `--fbx-clips idle,run_forward` limits the FBX set.
+Run `validate_ue_retarget.py` on the saved `.blend` with the source animation
+`.blend`, original character `.blend`, and report path to check sampled poses,
+unchanged rest bones, and weighted bone coverage. The `.blend` is the
+authoritative retarget; FBX has an observed one-frame time-origin shift on
+Blender reimport while the sampled `run_forward` poses remain equivalent.
+
 ## Coverage and limitations
 
 Tested against the user's installed resources on 2026-10-10:

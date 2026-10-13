@@ -6,6 +6,10 @@
 #include <QUuid>
 #include <algorithm>
 #include <functional>
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <dwmapi.h>
+#endif
 
 struct Step { QString title, program; QStringList arguments; int maximumExit = 0; };
 struct SceneIdentity { QString id, title, method; };
@@ -13,7 +17,7 @@ struct SceneIdentity { QString id, title, method; };
 // Process boundaries isolate old IKVM/.NET and current Java formats from Qt.
 // No parsing/exporting code from the working legacy backend is modified.
 class Studio : public QMainWindow {
-    QLineEdit *game, *blender, *java, *archive, *output, *globals, *colorNode;
+    QLineEdit *game, *blender, *java, *archive, *output, *globals, *colorNode, *ueCharacter;
     QTabWidget *tabs;
     QListWidget *levels, *skies, *models;
     QTreeWidget *modelHierarchy, *modelProperties;
@@ -30,11 +34,19 @@ class Studio : public QMainWindow {
     QProcess process;
     QProcess *inspectProcess = nullptr;
     QProcess *previewProcess = nullptr;
+    QWidget *previewHost = nullptr;
+    QWidget *previewOverlay = nullptr;
+    QLabel *previewPlaceholder = nullptr;
+#ifdef Q_OS_WIN
+    HTHUMBNAIL previewThumbnail = nullptr;
+    HWND previewSourceWindow = nullptr;
+#endif
     QList<Step> pending;
     Step active;
     QFile logFile;
-    QString resultPath, bundlePath, mode, selectedOutput, stagingPath, exportPrefix, previousPrefix, currentSource;
+    QString resultPath, ueResultPath, bundlePath, mode, selectedOutput, stagingPath, exportPrefix, previousPrefix, currentSource;
     QString batchModelVariant;
+    QString batchUeFbxClips;
     SceneIdentity currentScene;
     QHash<QString,QString> sceneNames,sceneFingerprints;
     bool batch = false, busy = false, cancelled = false, openModelInBlender = false;
@@ -46,11 +58,27 @@ class Studio : public QMainWindow {
     QString blenderExecutable() const {return blender->text().isEmpty()?bundledBlender():blender->text();}
     QString javaExecutable() const {
         if(!java->text().isEmpty())return java->text();
-        if(QFileInfo::exists(bundledJava()))return bundledJava();
+        const QString gameRuntime=QDir(game->text()).filePath("java_vm");
+        const QString gameJava=QDir(gameRuntime).filePath("bin/java.exe");
+        if(QFileInfo::exists(gameJava)&&!QFileInfo::exists(QDir(gameRuntime).filePath("lib/ext")))return gameJava;
         const QString cached=QStandardPaths::writableLocation(QStandardPaths::CacheLocation)+"/game-java/bin/java.exe";
         if(QFileInfo::exists(cached))return cached;
-        return QDir(game->text()).filePath("java_vm/bin/java.exe");
+        if(QFileInfo::exists(bundledJava()))return bundledJava();
+        return gameJava;
     }
+
+#ifdef Q_OS_WIN
+    struct PreviewWindowSearch { DWORD pid; HWND result = nullptr; qint64 area = 0; };
+    static BOOL CALLBACK findPreviewWindow(HWND window, LPARAM parameter) {
+        auto *search=reinterpret_cast<PreviewWindowSearch*>(parameter);
+        DWORD pid=0;GetWindowThreadProcessId(window,&pid);
+        if(pid!=search->pid||!IsWindowVisible(window)||GetWindow(window,GW_OWNER))return TRUE;
+        RECT bounds{};if(!GetWindowRect(window,&bounds))return TRUE;
+        const qint64 area=qMax(0L,bounds.right-bounds.left)*qint64(qMax(0L,bounds.bottom-bounds.top));
+        if(area>search->area){search->area=area;search->result=window;}
+        return TRUE;
+    }
+#endif
 
     QLineEdit *pathRow(QFormLayout *form, const QString &title, const QString &key,
                       bool directory, const QString &fallback = {}) {
@@ -142,8 +170,10 @@ class Studio : public QMainWindow {
     QString publishedName(const QString &relative) const {
         const QString file=QFileInfo(relative).fileName();
         if(file.startsWith("trs-texture-") && file.endsWith(".png"))return file;
+        if(file=="UE-Retargeted.blend")return exportPrefix+".ue.blend";
         if(file.endsWith(".blend",Qt::CaseInsensitive))return exportPrefix+".blend";
         if(file.endsWith(".glb",Qt::CaseInsensitive))return exportPrefix+".glb";
+        if(relative.startsWith("ue-fbx/"))return exportPrefix+".ue."+file;
         if(relative.startsWith("fbx/"))return exportPrefix+"."+file;
         return exportPrefix+"."+file;
     }
@@ -219,6 +249,7 @@ class Studio : public QMainWindow {
         cleanMatchingLegacyScene();
         cleanPreviousPrefix();
         resultPath=QDir(selectedOutput).filePath(exportPrefix+".blend");
+        if(!ueResultPath.isEmpty())ueResultPath=QDir(selectedOutput).filePath(exportPrefix+".ue.blend");
         bundlePath=QDir(selectedOutput).filePath(exportPrefix+"."+(mode=="animation"?"knight-animations.json":"scene.json"));
         append(QString("Updated %1 named export files in %2\n").arg(published.size()).arg(selectedOutput));
         return true;
@@ -247,6 +278,9 @@ class Studio : public QMainWindow {
         if(cancelled){finish(false,"Cancelled. The selected folder remains available for retry.");return;}
         if(pending.isEmpty()) {
             if(!QFileInfo::exists(resultPath)){finish(false,"Backend exited without the expected .blend file.");return;}
+            if(!ueResultPath.isEmpty()&&!QFileInfo::exists(ueResultPath)){
+                finish(false,"Retargeting exited without the expected UE .blend file.");return;
+            }
             QFile report(QFileInfo(bundlePath).dir().filePath(mode=="animation"?"export-report.json":"scene-report.json"));
             int warnings = 0;
             if(report.open(QIODevice::ReadOnly)) {
@@ -256,7 +290,9 @@ class Studio : public QMainWindow {
             }
             QString error;
             if(!publish(error)){finish(false,"Export could not replace the selected files: "+error);return;}
-            finish(true,QString("Export complete — %1 reported limitations. %2").arg(warnings).arg(resultPath));return;
+            QString message=QString("Export complete — %1 reported limitations. %2").arg(warnings).arg(resultPath);
+            if(!ueResultPath.isEmpty())message+="\nUE retarget: "+ueResultPath;
+            finish(true,message);return;
         }
         active=pending.takeFirst();status->setText(active.title);
         append("\n=== "+active.title+" ===\n");
@@ -380,42 +416,101 @@ class Studio : public QMainWindow {
         });
         inspect->start();
     }
+    void clearPreviewWindow() {
+#ifdef Q_OS_WIN
+        if(previewThumbnail){DwmUnregisterThumbnail(previewThumbnail);previewThumbnail=nullptr;}
+        previewSourceWindow=nullptr;
+#endif
+        if(previewOverlay){previewOverlay->hide();previewOverlay->deleteLater();previewOverlay=nullptr;}
+        if(previewPlaceholder)previewPlaceholder->show();
+    }
+    void updatePreviewThumbnail() {
+#ifdef Q_OS_WIN
+        if(!previewThumbnail||!previewHost||!previewOverlay)return;
+        const bool visible=previewHost->isVisible()&&isVisible()&&!isMinimized()&&tabs&&tabs->currentIndex()==1;
+        previewOverlay->setVisible(visible);if(!visible)return;
+        const QPoint global=previewHost->mapToGlobal(QPoint(0,0));
+        previewOverlay->setGeometry(global.x(),global.y(),previewHost->width(),previewHost->height());
+        const qreal scale=devicePixelRatioF();
+        DWM_THUMBNAIL_PROPERTIES properties{};properties.dwFlags=DWM_TNP_RECTDESTINATION|DWM_TNP_VISIBLE|DWM_TNP_OPACITY|DWM_TNP_SOURCECLIENTAREAONLY;
+        properties.rcDestination={0,0,LONG(previewHost->width()*scale),LONG(previewHost->height()*scale)};
+        properties.fVisible=TRUE;properties.opacity=255;properties.fSourceClientAreaOnly=TRUE;
+        DwmUpdateThumbnailProperties(previewThumbnail,&properties);
+#endif
+    }
+    void attachPreviewWindow(int attempts=0) {
+        if(!previewProcess||previewProcess->state()==QProcess::NotRunning)return;
+#ifdef Q_OS_WIN
+        if(previewThumbnail)return;
+        PreviewWindowSearch search{DWORD(previewProcess->processId())};
+        EnumWindows(findPreviewWindow,reinterpret_cast<LPARAM>(&search));
+        if(search.result&&search.area>=120000){
+            previewSourceWindow=search.result;
+            previewOverlay=new QWidget(this,Qt::Tool|Qt::FramelessWindowHint);
+            previewOverlay->setAttribute(Qt::WA_ShowWithoutActivating);previewOverlay->setStyleSheet("background:#202020;");
+            previewOverlay->show();
+            if(SUCCEEDED(DwmRegisterThumbnail(HWND(previewOverlay->winId()),previewSourceWindow,&previewThumbnail))){
+                SetWindowPos(previewSourceWindow,HWND_BOTTOM,0,0,900,700,SWP_NOACTIVATE|SWP_SHOWWINDOW);
+                previewPlaceholder->hide();updatePreviewThumbnail();
+                status->setText("SpiralView is rendering in a separate process; Windows is compositing its live preview here.");
+                return;
+            }
+            previewOverlay->deleteLater();previewOverlay=nullptr;
+        }
+#endif
+        if(attempts<40)QTimer::singleShot(250,this,[this,attempts]{attachPreviewWindow(attempts+1);});
+        else status->setText("SpiralView started but its preview window could not be attached. Check the preview log.");
+    }
+    void stopPreview() {
+        if(!previewProcess){clearPreviewWindow();return;}
+        status->setText("Closing SpiralView preview…");
+        previewProcess->terminate();
+        QTimer::singleShot(1500,previewProcess,[process=previewProcess]{if(process->state()!=QProcess::NotRunning)process->kill();});
+    }
     void previewModel() {
         const QString source=selection(models),runtime=javaExecutable();
         if(source.isEmpty()){status->setText("Choose a model to preview.");return;}
-        QString viewer=backend("spiralview.jar"),viewerClass="com.luuqui.spiralview.ModelViewerHook";
-        if(!QFileInfo(viewer).isFile())viewer=QDir(game->text()).filePath("KnightLauncher/modules/spiralview/spiralview.jar");
-        if(!QFileInfo(viewer).isFile()){viewer=QDir(game->text()).filePath("spiralview.jar");viewerClass="net.lucasallegri.spiralview.ModelViewerHook";}
+        const QString viewer=backend("spiralview.jar");
         if(!QFileInfo(viewer).isFile()||!QFileInfo(runtime).isFile()){
-            status->setText("SpiralView or the Java runtime is missing from this package.");return;
+            status->setText("The packaged SpiralView or a compatible Java runtime is missing.");return;
         }
         if(output->text().trimmed().isEmpty()){
             status->setText("Choose an output folder for the SpiralView startup log.");return;
         }
-        if(previewProcess){status->setText("SpiralView is already open or starting.");return;}
-        const QString lwjgl=backend("lwjgl2/lwjgl-2.9.3.jar"),lwjglUtil=backend("lwjgl2/lwjgl_util-2.9.3.jar");
-        if(!QFileInfo(lwjgl).isFile()||!QFileInfo(lwjglUtil).isFile()){
-            status->setText("SpiralView support files are missing; use Preview in Blender.");return;
-        }
-        QStringList args={"-Xmx3g","-Xshare:off","--enable-native-access=ALL-UNNAMED","-Dappdir="+game->text(),
-            "-Dresource_dir="+QDir(game->text()).filePath("rsrc"),
-            "-Djava.library.path="+backend("preview-native")+QDir::listSeparator()+QDir(game->text()).filePath("native"),
-            "-cp",viewer+QDir::listSeparator()+lwjgl+QDir::listSeparator()+lwjglUtil+QDir::listSeparator()+QDir(game->text()).filePath("code/*"),viewerClass,source};
+        if(previewProcess){status->setText("Close the current SpiralView preview before opening another model.");return;}
+        const QString code=QDir(game->text()).filePath("code");
+        const QStringList jars={"projectx-config.jar","projectx-pcode.jar","lwjgl.jar","lwjgl-opengl.jar","lwjgl-openal.jar",
+            "lwjgl-glfw.jar","lwjgl-jawt.jar","lwjgl3-awt.jar","lwjgl-natives-windows.jar","lwjgl-opengl-natives-windows.jar",
+            "lwjgl-openal-natives-windows.jar","lwjgl-glfw-natives-windows.jar","commons-beanutils.jar",
+            "commons-digester.jar","commons-logging.jar"};
+        QStringList classpath{viewer},missing;
+        for(const QString &name:jars){const QString path=QDir(code).filePath(name);classpath<<path;if(!QFileInfo(path).isFile())missing<<name;}
+        if(!missing.isEmpty()){status->setText("The game installation is missing SpiralView dependencies: "+missing.join(", "));return;}
+        QString modelArgument=QDir(game->text()).relativeFilePath(source);
+        if(modelArgument.startsWith("../"))modelArgument=source;
+        modelArgument=QDir::fromNativeSeparators(modelArgument);
+        QStringList args={"-Xms512m","-Xmx2G","-Xshare:off","-Dcom.threerings.getdown=false","-Dorg.lwjgl.util.NoChecks=true",
+            "-Dsun.java2d.d3d=false","-XX:-CreateCoredumpOnCrash","-XX:+SuppressFatalErrorMessage",
+            "--add-opens=java.base/java.lang=ALL-UNNAMED","--add-opens=java.base/java.util=ALL-UNNAMED",
+            "--enable-native-access=ALL-UNNAMED","-Dappdir="+QDir::fromNativeSeparators(game->text())+"/",
+            "-Dresource_dir="+QDir(game->text()).filePath("rsrc"),"-Djava.library.path="+QDir(game->text()).filePath("native"),
+            "-classpath",classpath.join(QDir::listSeparator()),"com.lucasluqui.spiralview.ModelViewerHook",modelArgument};
         QDir().mkpath(output->text());
         const QString previewLog=QDir(output->text()).filePath(prefixFor("model",source,game->text())+".spiralview.log");
         auto viewerProcess=new QProcess(this);previewProcess=viewerProcess;
         viewerProcess->setWorkingDirectory(game->text());viewerProcess->setProcessChannelMode(QProcess::MergedChannels);
         viewerProcess->setStandardOutputFile(previewLog,QIODevice::Truncate);
+        connect(viewerProcess,&QProcess::started,this,[this]{QTimer::singleShot(750,this,[this]{attachPreviewWindow();});});
         connect(viewerProcess,qOverload<int,QProcess::ExitStatus>(&QProcess::finished),this,[this,viewerProcess,previewLog](int code,QProcess::ExitStatus){
             if(previewProcess==viewerProcess)previewProcess=nullptr;
-            viewerProcess->deleteLater();
-            if(code)status->setText("SpiralView exited with an error. See "+previewLog+" and the game's viewer.log. Preview in Blender remains available.");
+            clearPreviewWindow();viewerProcess->deleteLater();
+            status->setText(code?"SpiralView exited with an error. See "+previewLog+" and the game's viewer.log.":"SpiralView preview closed.");
         });
         connect(viewerProcess,&QProcess::errorOccurred,this,[this,viewerProcess,previewLog](QProcess::ProcessError error){
-            if(error==QProcess::FailedToStart){if(previewProcess==viewerProcess)previewProcess=nullptr;status->setText("Could not start SpiralView. See "+previewLog);viewerProcess->deleteLater();}
+            if(error==QProcess::FailedToStart){if(previewProcess==viewerProcess)previewProcess=nullptr;clearPreviewWindow();status->setText("Could not start SpiralView. See "+previewLog);viewerProcess->deleteLater();}
         });
         viewerProcess->start(runtime,args);
-        status->setText("Launching SpiralView; any startup error will appear here and in "+previewLog);
+        status->setText("Launching the current KnightLauncher SpiralView…");
     }
     QWidget *modelPage() {
         auto page=new QWidget;auto row=new QHBoxLayout(page);
@@ -427,12 +522,21 @@ class Studio : public QMainWindow {
         row->addWidget(left,1);
         auto right=new QWidget;auto details=new QVBoxLayout(right);
         modelSummary=new QLabel("Choose a model .dat file.");modelSummary->setWordWrap(true);details->addWidget(modelSummary);
-        auto preview=new QPushButton("Preview in SpiralView (experimental)");details->addWidget(preview);
+        auto previewButtons=new QHBoxLayout;
+        auto preview=new QPushButton("Preview in SpiralView");previewButtons->addWidget(preview);
+        auto closePreview=new QPushButton("Close preview");previewButtons->addWidget(closePreview);
+        details->addLayout(previewButtons);
         auto blenderPreview=new QPushButton("Preview in Blender");details->addWidget(blenderPreview);
+        previewHost=new QWidget;previewHost->setMinimumHeight(300);previewHost->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Expanding);
+        auto previewLayout=new QVBoxLayout(previewHost);previewLayout->setContentsMargins(0,0,0,0);
+        previewPlaceholder=new QLabel("SpiralView preview appears here in its own process.\nSelect a model, then click Preview in SpiralView.");
+        previewPlaceholder->setAlignment(Qt::AlignCenter);previewPlaceholder->setWordWrap(true);
+        previewPlaceholder->setStyleSheet("QLabel{border:1px solid palette(mid);border-radius:4px;background:palette(base);color:palette(text);}");
+        previewLayout->addWidget(previewPlaceholder);details->addWidget(previewHost,3);
         auto variantRow=new QFormLayout;modelVariant=new QComboBox;modelVariant->setEnabled(false);variantRow->addRow("Static-set variant",modelVariant);details->addLayout(variantRow);
         glb=new QCheckBox("Also export a single .glb model");glb->setChecked(true);details->addWidget(glb);
         auto choicesBox=new QGroupBox("Choice parameters");modelChoices=new QFormLayout(choicesBox);details->addWidget(choicesBox);
-        details->addWidget(new QLabel("Model hierarchy"));modelHierarchy=new QTreeWidget;modelHierarchy->setHeaderLabels({"Part","Kind","Vertices"});details->addWidget(modelHierarchy,2);
+        details->addWidget(new QLabel("Model hierarchy"));modelHierarchy=new QTreeWidget;modelHierarchy->setHeaderLabels({"Part","Kind","Vertices"});details->addWidget(modelHierarchy,1);
         details->addWidget(new QLabel("Source parameters"));modelProperties=new QTreeWidget;modelProperties->setHeaderLabels({"Parameter","Kind","Options"});details->addWidget(modelProperties,1);
         row->addWidget(right,2);
         connect(scan,&QPushButton::clicked,this,[this]{
@@ -450,6 +554,7 @@ class Studio : public QMainWindow {
         });
         connect(models,&QListWidget::currentItemChanged,this,[this](QListWidgetItem *item){inspectModel(item?item->data(Qt::UserRole).toString():QString());});
         connect(preview,&QPushButton::clicked,this,[this]{previewModel();});
+        connect(closePreview,&QPushButton::clicked,this,[this]{stopPreview();});
         connect(blenderPreview,&QPushButton::clicked,this,[this]{
             if(selection(models).isEmpty()){status->setText("Choose a model to preview.");return;}
             openModelInBlender=true;start("model",selection(models));
@@ -457,9 +562,19 @@ class Studio : public QMainWindow {
         return page;
     }
 protected:
+    void moveEvent(QMoveEvent *event) override {
+        QMainWindow::moveEvent(event);QTimer::singleShot(0,this,[this]{updatePreviewThumbnail();});
+    }
+    void resizeEvent(QResizeEvent *event) override {
+        QMainWindow::resizeEvent(event);QTimer::singleShot(0,this,[this]{updatePreviewThumbnail();});
+    }
+    void changeEvent(QEvent *event) override {
+        QMainWindow::changeEvent(event);
+        if(event->type()==QEvent::WindowStateChange)QTimer::singleShot(0,this,[this]{updatePreviewThumbnail();});
+    }
     void closeEvent(QCloseEvent *event) override {
         if(busy){status->setText("Cancel the running export before closing.");event->ignore();}
-        else {if(inspectProcess)inspectProcess->kill();event->accept();}
+        else {if(inspectProcess)inspectProcess->kill();clearPreviewWindow();if(previewProcess)previewProcess->kill();event->accept();}
     }
 public:
     Studio() {
@@ -484,14 +599,25 @@ public:
         layout->addWidget(config);
         tabs=new QTabWidget;
         auto animations=new QWidget;auto animLayout=new QVBoxLayout(animations);
-        auto explanation=new QLabel("Export all stored knight animation clips as Blender Actions.\nUE names follow anatomy and retain the source skeleton; this does not retarget to the UE mannequin.");
+        auto explanation=new QLabel("Export stored knight clips as Blender Actions. Select a rigged UE character .blend below to also bake those Actions onto its existing skeleton and meshes.");
         explanation->setWordWrap(true);animLayout->addWidget(explanation);
         ueNames=new QCheckBox("Use anatomical UE bone names");ueNames->setChecked(true);animLayout->addWidget(ueNames);
-        fbx=new QCheckBox("Also export one FBX per clip (experimental weapon helper transforms)");animLayout->addWidget(fbx);
+        fbx=new QCheckBox("Also export FBX clips (UE skeletal mesh and animations when a character is selected)");animLayout->addWidget(fbx);
+        auto ueForm=new QFormLayout;
+        ueCharacter=pathRow(ueForm,"Rigged UE character .blend","ue-character",false);
+        ueCharacter->setPlaceholderText("Optional: retarget onto this model's existing 88-bone armature");
+        animLayout->addLayout(ueForm);
+        connect(ueCharacter,&QLineEdit::textChanged,this,[this](const QString &path){
+            const bool retarget=!path.trimmed().isEmpty();
+            if(retarget)ueNames->setChecked(true);
+            ueNames->setEnabled(!retarget);
+        });
+        if(!ueCharacter->text().trimmed().isEmpty()){ueNames->setChecked(true);ueNames->setEnabled(false);}
         animLayout->addStretch();tabs->addTab(animations,"Knight animations");
         tabs->addTab(modelPage(),"Models");
         tabs->addTab(sourcePage("Select a saved SKSA scene. Static geometry, instances and textures are exported; runtime-only effects are listed in the report.",levels,false),"Levels");
         tabs->addTab(sourcePage("Select a skybox wrapper or model. Geometry and parallax metadata are preserved. Camera-follow motion is not baked.",skies,true),"Skyboxes");
+        connect(tabs,&QTabWidget::currentChanged,this,[this]{QTimer::singleShot(0,this,[this]{updatePreviewThumbnail();});});
         layout->addWidget(tabs,1);
         auto actions=new QHBoxLayout;run=new QPushButton("Export to Blender");run->setDefault(true);actions->addWidget(run);
         cancel=new QPushButton("Cancel");cancel->setEnabled(false);actions->addWidget(cancel);
@@ -519,7 +645,7 @@ public:
     }
     void start(const QString &kind,const QString &source) {
         if(busy)return;
-        busy=true;cancelled=false;mode=kind;currentSource=source;log->clear();pending.clear();selectedOutput.clear();stagingPath.clear();
+        busy=true;cancelled=false;mode=kind;currentSource=source;log->clear();pending.clear();selectedOutput.clear();stagingPath.clear();ueResultPath.clear();
         auto fail=[this](const QString &s){finish(false,s);};
         if(game->text().trimmed().isEmpty()){fail("Choose the Spiral Knights installation folder.");return;}
         if(output->text().trimmed().isEmpty()){fail("Choose an export folder.");return;}
@@ -546,15 +672,23 @@ public:
         if(!QFileInfo(blenderExecutable()).isFile()){fail("Packaged Blender 4.2 LTS is missing; restore the complete application folder.");return;}
         if(kind!="animation"&&!QFileInfo(source).isFile()){fail("Select a readable source file.");return;}
         if(!QFileInfo::exists(backend("trs-export.jar"))||!QFileInfo::exists(backend("build_blend.py"))){fail("Backend files missing. Restore the complete application folder.");return;}
+        const QString ueModel=kind=="animation"?ueCharacter->text().trimmed():QString();
+        if(!ueModel.isEmpty() && (!QFileInfo(ueModel).isFile() || !ueModel.endsWith(".blend",Qt::CaseInsensitive))){
+            fail("Choose a readable rigged UE character .blend file.");return;
+        }
         stagingPath=QDir(destination).filePath(".trs-stage-"+QUuid::createUuid().toString(QUuid::WithoutBraces));
         QString javaPath=javaExecutable();
-        if(java->text().isEmpty()&&!QFileInfo::exists(bundledJava())) {
-            QString runtime=QDir(game->text()).filePath("java_vm");javaPath=runtime+"/bin/java.exe";
+        if(java->text().isEmpty()) {
+            QString runtime=QDir(game->text()).filePath("java_vm");
+            const QString installedJava=runtime+"/bin/java.exe";
             if(QFileInfo::exists(runtime+"/lib/ext")) {
                 QString cache=QStandardPaths::writableLocation(QStandardPaths::CacheLocation)+"/game-java";
+                // The cache belongs exclusively to TRS. Remove a stale extension folder before
+                // the incremental copy because modern Java refuses to start when it is present.
+                QDir(cache+"/lib/ext").removeRecursively();
                 pending.append({"Prepare compatible game Java runtime","C:/Windows/System32/robocopy.exe",{QDir::toNativeSeparators(runtime),QDir::toNativeSeparators(cache),"/E","/XD","ext","/R:1","/W:1","/NFL","/NDL","/NJH","/NJS","/NP"},7});
                 javaPath=cache+"/bin/java.exe";
-            }
+            }else if(QFileInfo::exists(installedJava))javaPath=installedJava;
         }
         if(pending.isEmpty()&&!QFileInfo(javaPath).isFile()){fail("Java executable missing; choose a runtime compatible with the installed game.");return;}
         QStringList args={"-Xmx4g","-Xshare:off","-cp",backend("trs-export.jar")+QDir::listSeparator()+QDir(game->text()).filePath("code/*"),kind=="animation"?"KnightAnimationExport":"SceneExport",rsrc};
@@ -578,24 +712,44 @@ public:
         bundlePath=stagingPath+(kind=="animation"?"/knight-animations.json":"/scene.json");resultPath=stagingPath+"/"+(kind=="animation"?"Knight-Animations.blend":kind=="scene"?"Level.blend":kind=="model"?"Model.blend":"Skybox.blend");
         QString logicalBundle=QDir(destination).filePath(exportPrefix+"."+(kind=="animation"?"knight-animations.json":"scene.json"));
         QStringList blendArgs={"--background","--factory-startup","--python-exit-code","1","--python",backend("build_blend.py"),"--",kind,bundlePath,resultPath,"--logical-bundle",logicalBundle};
-        if(kind=="animation"&&ueNames->isChecked())blendArgs<<"--ue-names";
-        if(kind=="animation"&&fbx->isChecked())blendArgs<<"--fbx";
+        if(kind=="animation"&&(ueNames->isChecked()||!ueModel.isEmpty()))blendArgs<<"--ue-names";
+        if(kind=="animation"&&fbx->isChecked()&&ueModel.isEmpty())blendArgs<<"--fbx";
         if(kind=="model"&&glb->isChecked())blendArgs<<"--glb";
         if(!colorNode->text().isEmpty()){
             if(!QFileInfo(colorNode->text()).isFile()){fail("Color node library does not exist.");return;}
             blendArgs<<"--color-node"<<colorNode->text();
         }
         pending.append({"Build Blender file",blenderExecutable(),blendArgs});
+        if(!ueModel.isEmpty()){
+            if(!QFileInfo(backend("retarget_ue.py")).isFile()){
+                fail("UE retarget script is missing from the package.");return;
+            }
+            ueResultPath=stagingPath+"/UE-Retargeted.blend";
+            QStringList retargetArgs={"--background",ueModel,"--python-exit-code","1","--python",backend("retarget_ue.py"),"--",
+                                      resultPath,ueResultPath,stagingPath+"/ue-retarget-report.json"};
+            if(fbx->isChecked()){
+                retargetArgs<<"--fbx-directory"<<stagingPath+"/ue-fbx";
+                if(!batchUeFbxClips.isEmpty())retargetArgs<<"--fbx-clips"<<batchUeFbxClips;
+            }
+            pending.append({"Retarget onto UE character",blenderExecutable(),retargetArgs});
+        }
         append("Output: "+destination+"\n");run->setEnabled(false);cancel->setEnabled(true);openResult->setEnabled(false);tabs->setEnabled(false);progress->setRange(0,0);next();
     }
     void commandLine(const QCommandLineParser &parser) {
-        for(auto pair:QList<QPair<QString,QLineEdit*>>{{"game",game},{"blender",blender},{"java",java},{"output",output},{"globals",globals},{"archive",archive},{"color-node",colorNode}})
+        for(auto pair:QList<QPair<QString,QLineEdit*>>{{"game",game},{"blender",blender},{"java",java},{"output",output},{"globals",globals},{"archive",archive},{"color-node",colorNode},{"ue-character",ueCharacter}})
             if(parser.isSet(pair.first))pair.second->setText(parser.value(pair.first));
         ueNames->setChecked(!parser.isSet("source-names"));fbx->setChecked(parser.isSet("fbx"));
         batchModelVariant=parser.value("model-variant");
+        batchUeFbxClips=parser.value("ue-fbx-clips");
         if(parser.isSet("tab")){
             const QString tab=parser.value("tab");
             tabs->setCurrentIndex(tab=="models"?1:tab=="levels"?2:tab=="skyboxes"?3:0);
+        }
+        if(parser.isSet("preview-source")){
+            const QString source=QFileInfo(parser.value("preview-source")).absoluteFilePath();
+            auto item=new QListWidgetItem(QDir(QDir(game->text()).filePath("rsrc")).relativeFilePath(source),models);
+            item->setData(Qt::UserRole,source);models->setCurrentItem(item);tabs->setCurrentIndex(1);
+            QTimer::singleShot(500,this,[this]{previewModel();});
         }
         if(parser.isSet("batch")){
             batch=true;QString kind=parser.value("batch");
@@ -606,14 +760,18 @@ public:
             });
             if(parser.isSet("cancel-after-ms"))QTimer::singleShot(qMax(1,parser.value("cancel-after-ms").toInt()),this,[this]{cancel->click();});
         }
-        if(parser.isSet("screenshot"))QTimer::singleShot(400,this,[this,&parser]{grab().save(parser.value("screenshot"));if(!batch)qApp->quit();});
+        if(parser.isSet("screenshot"))QTimer::singleShot(parser.isSet("preview-source")?7000:400,this,[this,&parser]{
+            const QRect bounds=frameGeometry();
+            const QPixmap image=parser.isSet("preview-source")?screen()->grabWindow(0,bounds.x(),bounds.y(),bounds.width(),bounds.height()):grab();
+            image.save(parser.value("screenshot"));if(!batch)qApp->quit();
+        });
     }
 };
 
 int main(int argc,char **argv) {
     QApplication app(argc,argv);app.setApplicationName("ThreeRingsStudio");app.setOrganizationName("ThreeRingsSharp");app.setApplicationVersion(TRS_VERSION);
     QCommandLineParser parser;parser.setApplicationDescription("ThreeRings Studio export frontend");parser.addHelpOption();parser.addVersionOption();
-    for(const auto &name:{"batch","source","game","blender","java","output","globals","archive","screenshot","color-node","cancel-after-ms","model-variant","tab"})parser.addOption({name,QString("Set %1").arg(name),"value"});
+    for(const auto &name:{"batch","source","game","blender","java","output","globals","archive","screenshot","color-node","cancel-after-ms","model-variant","tab","ue-character","ue-fbx-clips","preview-source"})parser.addOption({name,QString("Set %1").arg(name),"value"});
     parser.addOption({"source-names","Keep original SK bone names"});parser.addOption({"fbx","Also export animation FBX files"});
     parser.addOption({"glb","Also export a single GLB for a selected model (enabled by default)"});parser.process(app);
     Studio window;if(!parser.isSet("batch")||parser.isSet("screenshot"))window.show();window.commandLine(parser);return app.exec();
