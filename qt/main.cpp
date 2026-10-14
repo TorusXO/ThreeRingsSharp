@@ -45,6 +45,7 @@ class Studio : public QMainWindow {
     Step active;
     QFile logFile;
     QString resultPath, ueResultPath, bundlePath, mode, selectedOutput, stagingPath, exportPrefix, previousPrefix, currentSource;
+    QString previewControlPath;
     QString batchModelVariant;
     QString batchUeFbxClips;
     SceneIdentity currentScene;
@@ -206,7 +207,7 @@ class Studio : public QMainWindow {
         oldBundle.close();
         auto normalized=[](QString path){return QDir::cleanPath(path.replace('\\','/'));};
         if(source.isEmpty() || normalized(source).compare(normalized(currentSource),Qt::CaseInsensitive)!=0)return;
-        for(const QString &file:{"scene.json","scene-report.json","blender-scene-validation.json","Level.blend","Skybox.blend","export.log","export-manifest.json"})
+        for(const QString &file:QStringList{"scene.json","scene-report.json","blender-scene-validation.json","Level.blend","Skybox.blend","export.log","export-manifest.json"})
             QFile::remove(QDir(selectedOutput).filePath(file));
         QDir textures(QDir(selectedOutput).filePath("textures"));
         for(const QString &file:textures.entryList({"recolored_*.png"},QDir::Files))textures.remove(file);
@@ -431,9 +432,18 @@ class Studio : public QMainWindow {
         previewOverlay->setVisible(visible);if(!visible)return;
         const QPoint global=previewHost->mapToGlobal(QPoint(0,0));
         previewOverlay->setGeometry(global.x(),global.y(),previewHost->width(),previewHost->height());
-        const qreal scale=devicePixelRatioF();
+        const qreal scale=previewOverlay->devicePixelRatioF();
+        const LONG width=qMax(1,LONG(previewHost->width()*scale)),height=qMax(1,LONG(previewHost->height()*scale));
+        if(previewSourceWindow)SetWindowPos(previewSourceWindow,HWND_BOTTOM,-32000,-32000,width,height,SWP_NOACTIVATE|SWP_SHOWWINDOW);
+        SIZE sourceSize{width,height};DwmQueryThumbnailSourceSize(previewThumbnail,&sourceSize);
+        LONG targetWidth=width,targetHeight=height,left=0,top=0;
+        if(sourceSize.cx>0&&sourceSize.cy>0){
+            const double sourceAspect=double(sourceSize.cx)/sourceSize.cy,targetAspect=double(width)/height;
+            if(sourceAspect>targetAspect){targetHeight=LONG(width/sourceAspect);top=(height-targetHeight)/2;}
+            else {targetWidth=LONG(height*sourceAspect);left=(width-targetWidth)/2;}
+        }
         DWM_THUMBNAIL_PROPERTIES properties{};properties.dwFlags=DWM_TNP_RECTDESTINATION|DWM_TNP_VISIBLE|DWM_TNP_OPACITY|DWM_TNP_SOURCECLIENTAREAONLY;
-        properties.rcDestination={0,0,LONG(previewHost->width()*scale),LONG(previewHost->height()*scale)};
+        properties.rcDestination={left,top,left+targetWidth,top+targetHeight};
         properties.fVisible=TRUE;properties.opacity=255;properties.fSourceClientAreaOnly=TRUE;
         DwmUpdateThumbnailProperties(previewThumbnail,&properties);
 #endif
@@ -447,29 +457,40 @@ class Studio : public QMainWindow {
         if(search.result&&search.area>=120000){
             previewSourceWindow=search.result;
             previewOverlay=new QWidget(this,Qt::Tool|Qt::FramelessWindowHint);
-            previewOverlay->setAttribute(Qt::WA_ShowWithoutActivating);previewOverlay->setStyleSheet("background:#202020;");
+            previewOverlay->setAttribute(Qt::WA_ShowWithoutActivating);previewOverlay->setAttribute(Qt::WA_TransparentForMouseEvents);
+            previewOverlay->setWindowFlag(Qt::WindowDoesNotAcceptFocus);previewOverlay->setStyleSheet("background:#202020;");
             previewOverlay->show();
             if(SUCCEEDED(DwmRegisterThumbnail(HWND(previewOverlay->winId()),previewSourceWindow,&previewThumbnail))){
-                SetWindowPos(previewSourceWindow,HWND_BOTTOM,0,0,900,700,SWP_NOACTIVATE|SWP_SHOWWINDOW);
                 previewPlaceholder->hide();updatePreviewThumbnail();
-                status->setText("SpiralView is rendering in a separate process; Windows is compositing its live preview here.");
+                status->setText("Model preview ready. Double-click another model to update it live.");
                 return;
             }
             previewOverlay->deleteLater();previewOverlay=nullptr;
         }
 #endif
-        if(attempts<40)QTimer::singleShot(250,this,[this,attempts]{attachPreviewWindow(attempts+1);});
+        if(attempts<240)QTimer::singleShot(250,this,[this,attempts]{attachPreviewWindow(attempts+1);});
         else status->setText("SpiralView started but its preview window could not be attached. Check the preview log.");
     }
     void stopPreview() {
-        if(!previewProcess){clearPreviewWindow();return;}
+        if(!previewProcess){clearPreviewWindow();QFile::remove(previewControlPath);previewControlPath.clear();return;}
         status->setText("Closing SpiralView preview…");
         previewProcess->terminate();
         QTimer::singleShot(1500,previewProcess,[process=previewProcess]{if(process->state()!=QProcess::NotRunning)process->kill();});
     }
+    bool writePreviewControl(const QString &source) {
+        if(previewControlPath.isEmpty())return false;
+        QSaveFile file(previewControlPath);
+        if(!file.open(QIODevice::WriteOnly|QIODevice::Text)||file.write(source.toUtf8())<0||!file.commit())return false;
+        return true;
+    }
     void previewModel() {
         const QString source=selection(models),runtime=javaExecutable();
         if(source.isEmpty()){status->setText("Choose a model to preview.");return;}
+        if(previewProcess){
+            if(writePreviewControl(source))status->setText("Loading "+QFileInfo(source).fileName()+" in the live preview…");
+            else status->setText("Could not update the preview control file.");
+            return;
+        }
         const QString viewer=backend("spiralview.jar");
         if(!QFileInfo(viewer).isFile()||!QFileInfo(runtime).isFile()){
             status->setText("The packaged SpiralView or a compatible Java runtime is missing.");return;
@@ -477,7 +498,6 @@ class Studio : public QMainWindow {
         if(output->text().trimmed().isEmpty()){
             status->setText("Choose an output folder for the SpiralView startup log.");return;
         }
-        if(previewProcess){status->setText("Close the current SpiralView preview before opening another model.");return;}
         const QString code=QDir(game->text()).filePath("code");
         const QStringList jars={"projectx-config.jar","projectx-pcode.jar","lwjgl.jar","lwjgl-opengl.jar","lwjgl-openal.jar",
             "lwjgl-glfw.jar","lwjgl-jawt.jar","lwjgl3-awt.jar","lwjgl-natives-windows.jar","lwjgl-opengl-natives-windows.jar",
@@ -489,28 +509,32 @@ class Studio : public QMainWindow {
         QString modelArgument=QDir(game->text()).relativeFilePath(source);
         if(modelArgument.startsWith("../"))modelArgument=source;
         modelArgument=QDir::fromNativeSeparators(modelArgument);
+        const QString previewCache=QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+        QDir().mkpath(previewCache);
+        previewControlPath=QDir(previewCache).filePath("model-preview-"+QUuid::createUuid().toString(QUuid::WithoutBraces)+".txt");
+        if(!writePreviewControl(source)){status->setText("Could not create the preview control file.");previewControlPath.clear();return;}
         QStringList args={"-Xms512m","-Xmx2G","-Xshare:off","-Dcom.threerings.getdown=false","-Dorg.lwjgl.util.NoChecks=true",
             "-Dsun.java2d.d3d=false","-XX:-CreateCoredumpOnCrash","-XX:+SuppressFatalErrorMessage",
             "--add-opens=java.base/java.lang=ALL-UNNAMED","--add-opens=java.base/java.util=ALL-UNNAMED",
             "--enable-native-access=ALL-UNNAMED","-Dappdir="+QDir::fromNativeSeparators(game->text())+"/",
             "-Dresource_dir="+QDir(game->text()).filePath("rsrc"),"-Djava.library.path="+QDir(game->text()).filePath("native"),
-            "-classpath",classpath.join(QDir::listSeparator()),"com.lucasluqui.spiralview.ModelViewerHook",modelArgument};
+            "-classpath",classpath.join(QDir::listSeparator()),"com.torusxo.trs.TrsModelPreview",modelArgument,previewControlPath};
         QDir().mkpath(output->text());
-        const QString previewLog=QDir(output->text()).filePath(prefixFor("model",source,game->text())+".spiralview.log");
+        const QString previewLog=QDir(output->text()).filePath("spiralview-preview.log");
         auto viewerProcess=new QProcess(this);previewProcess=viewerProcess;
         viewerProcess->setWorkingDirectory(game->text());viewerProcess->setProcessChannelMode(QProcess::MergedChannels);
         viewerProcess->setStandardOutputFile(previewLog,QIODevice::Truncate);
         connect(viewerProcess,&QProcess::started,this,[this]{QTimer::singleShot(750,this,[this]{attachPreviewWindow();});});
         connect(viewerProcess,qOverload<int,QProcess::ExitStatus>(&QProcess::finished),this,[this,viewerProcess,previewLog](int code,QProcess::ExitStatus){
             if(previewProcess==viewerProcess)previewProcess=nullptr;
-            clearPreviewWindow();viewerProcess->deleteLater();
+            clearPreviewWindow();QFile::remove(previewControlPath);previewControlPath.clear();viewerProcess->deleteLater();
             status->setText(code?"SpiralView exited with an error. See "+previewLog+" and the game's viewer.log.":"SpiralView preview closed.");
         });
         connect(viewerProcess,&QProcess::errorOccurred,this,[this,viewerProcess,previewLog](QProcess::ProcessError error){
-            if(error==QProcess::FailedToStart){if(previewProcess==viewerProcess)previewProcess=nullptr;clearPreviewWindow();status->setText("Could not start SpiralView. See "+previewLog);viewerProcess->deleteLater();}
+            if(error==QProcess::FailedToStart){if(previewProcess==viewerProcess)previewProcess=nullptr;clearPreviewWindow();QFile::remove(previewControlPath);previewControlPath.clear();status->setText("Could not start SpiralView. See "+previewLog);viewerProcess->deleteLater();}
         });
         viewerProcess->start(runtime,args);
-        status->setText("Launching the current KnightLauncher SpiralView…");
+        status->setText("Starting the background model renderer…");
     }
     QWidget *modelPage() {
         auto page=new QWidget;auto row=new QHBoxLayout(page);
@@ -529,7 +553,7 @@ class Studio : public QMainWindow {
         auto blenderPreview=new QPushButton("Preview in Blender");details->addWidget(blenderPreview);
         previewHost=new QWidget;previewHost->setMinimumHeight(300);previewHost->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Expanding);
         auto previewLayout=new QVBoxLayout(previewHost);previewLayout->setContentsMargins(0,0,0,0);
-        previewPlaceholder=new QLabel("SpiralView preview appears here in its own process.\nSelect a model, then click Preview in SpiralView.");
+        previewPlaceholder=new QLabel("Select a model and click Preview in SpiralView.\nDouble-click another model to switch the live preview.");
         previewPlaceholder->setAlignment(Qt::AlignCenter);previewPlaceholder->setWordWrap(true);
         previewPlaceholder->setStyleSheet("QLabel{border:1px solid palette(mid);border-radius:4px;background:palette(base);color:palette(text);}");
         previewLayout->addWidget(previewPlaceholder);details->addWidget(previewHost,3);
@@ -553,6 +577,7 @@ class Studio : public QMainWindow {
             item->setData(Qt::UserRole,path);models->setCurrentItem(item);
         });
         connect(models,&QListWidget::currentItemChanged,this,[this](QListWidgetItem *item){inspectModel(item?item->data(Qt::UserRole).toString():QString());});
+        connect(models,&QListWidget::itemDoubleClicked,this,[this](QListWidgetItem*){previewModel();});
         connect(preview,&QPushButton::clicked,this,[this]{previewModel();});
         connect(closePreview,&QPushButton::clicked,this,[this]{stopPreview();});
         connect(blenderPreview,&QPushButton::clicked,this,[this]{
@@ -601,18 +626,12 @@ public:
         auto animations=new QWidget;auto animLayout=new QVBoxLayout(animations);
         auto explanation=new QLabel("Export stored knight clips as Blender Actions. Select a rigged UE character .blend below to also bake those Actions onto its existing skeleton and meshes.");
         explanation->setWordWrap(true);animLayout->addWidget(explanation);
-        ueNames=new QCheckBox("Use anatomical UE bone names");ueNames->setChecked(true);animLayout->addWidget(ueNames);
+        ueNames=new QCheckBox("Rename exported source rig to anatomical UE bone names");ueNames->setChecked(false);animLayout->addWidget(ueNames);
         fbx=new QCheckBox("Also export FBX clips (UE skeletal mesh and animations when a character is selected)");animLayout->addWidget(fbx);
         auto ueForm=new QFormLayout;
         ueCharacter=pathRow(ueForm,"Rigged UE character .blend","ue-character",false);
         ueCharacter->setPlaceholderText("Optional: retarget onto this model's existing 88-bone armature");
         animLayout->addLayout(ueForm);
-        connect(ueCharacter,&QLineEdit::textChanged,this,[this](const QString &path){
-            const bool retarget=!path.trimmed().isEmpty();
-            if(retarget)ueNames->setChecked(true);
-            ueNames->setEnabled(!retarget);
-        });
-        if(!ueCharacter->text().trimmed().isEmpty()){ueNames->setChecked(true);ueNames->setEnabled(false);}
         animLayout->addStretch();tabs->addTab(animations,"Knight animations");
         tabs->addTab(modelPage(),"Models");
         tabs->addTab(sourcePage("Select a saved SKSA scene. Static geometry, instances and textures are exported; runtime-only effects are listed in the report.",levels,false),"Levels");
@@ -712,7 +731,7 @@ public:
         bundlePath=stagingPath+(kind=="animation"?"/knight-animations.json":"/scene.json");resultPath=stagingPath+"/"+(kind=="animation"?"Knight-Animations.blend":kind=="scene"?"Level.blend":kind=="model"?"Model.blend":"Skybox.blend");
         QString logicalBundle=QDir(destination).filePath(exportPrefix+"."+(kind=="animation"?"knight-animations.json":"scene.json"));
         QStringList blendArgs={"--background","--factory-startup","--python-exit-code","1","--python",backend("build_blend.py"),"--",kind,bundlePath,resultPath,"--logical-bundle",logicalBundle};
-        if(kind=="animation"&&(ueNames->isChecked()||!ueModel.isEmpty()))blendArgs<<"--ue-names";
+        if(kind=="animation"&&ueNames->isChecked())blendArgs<<"--ue-names";
         if(kind=="animation"&&fbx->isChecked()&&ueModel.isEmpty())blendArgs<<"--fbx";
         if(kind=="model"&&glb->isChecked())blendArgs<<"--glb";
         if(!colorNode->text().isEmpty()){
@@ -738,7 +757,7 @@ public:
     void commandLine(const QCommandLineParser &parser) {
         for(auto pair:QList<QPair<QString,QLineEdit*>>{{"game",game},{"blender",blender},{"java",java},{"output",output},{"globals",globals},{"archive",archive},{"color-node",colorNode},{"ue-character",ueCharacter}})
             if(parser.isSet(pair.first))pair.second->setText(parser.value(pair.first));
-        ueNames->setChecked(!parser.isSet("source-names"));fbx->setChecked(parser.isSet("fbx"));
+        ueNames->setChecked(parser.isSet("ue-names")&&!parser.isSet("source-names"));fbx->setChecked(parser.isSet("fbx"));
         batchModelVariant=parser.value("model-variant");
         batchUeFbxClips=parser.value("ue-fbx-clips");
         if(parser.isSet("tab")){
@@ -761,8 +780,7 @@ public:
             if(parser.isSet("cancel-after-ms"))QTimer::singleShot(qMax(1,parser.value("cancel-after-ms").toInt()),this,[this]{cancel->click();});
         }
         if(parser.isSet("screenshot"))QTimer::singleShot(parser.isSet("preview-source")?7000:400,this,[this,&parser]{
-            const QRect bounds=frameGeometry();
-            const QPixmap image=parser.isSet("preview-source")?screen()->grabWindow(0,bounds.x(),bounds.y(),bounds.width(),bounds.height()):grab();
+            const QPixmap image=grab();
             image.save(parser.value("screenshot"));if(!batch)qApp->quit();
         });
     }
@@ -772,7 +790,8 @@ int main(int argc,char **argv) {
     QApplication app(argc,argv);app.setApplicationName("ThreeRingsStudio");app.setOrganizationName("ThreeRingsSharp");app.setApplicationVersion(TRS_VERSION);
     QCommandLineParser parser;parser.setApplicationDescription("ThreeRings Studio export frontend");parser.addHelpOption();parser.addVersionOption();
     for(const auto &name:{"batch","source","game","blender","java","output","globals","archive","screenshot","color-node","cancel-after-ms","model-variant","tab","ue-character","ue-fbx-clips","preview-source"})parser.addOption({name,QString("Set %1").arg(name),"value"});
-    parser.addOption({"source-names","Keep original SK bone names"});parser.addOption({"fbx","Also export animation FBX files"});
+    parser.addOption({"ue-names","Rename the exported source rig to anatomical UE bone names"});
+    parser.addOption({"source-names","Keep original SK bone names (legacy override)"});parser.addOption({"fbx","Also export animation FBX files"});
     parser.addOption({"glb","Also export a single GLB for a selected model (enabled by default)"});parser.process(app);
     Studio window;if(!parser.isSet("batch")||parser.isSet("screenshot"))window.show();window.commandLine(parser);return app.exec();
 }

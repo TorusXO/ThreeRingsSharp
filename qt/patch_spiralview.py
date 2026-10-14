@@ -15,6 +15,7 @@ from pathlib import Path
 
 SOUNDER_PREFIX = "com/threerings/openal/config/SounderConfig"
 CONFIG_GROUP = "com/threerings/config/ConfigGroup.class"
+CONFIG_GROUP_INNER_PREFIX = "com/threerings/config/ConfigGroup$"
 
 
 def compiler_classpath(source: Path, destination: Path) -> None:
@@ -27,20 +28,22 @@ def compiler_classpath(source: Path, destination: Path) -> None:
             zout.writestr(item, data)
 
 
-def build(viewer: Path, clyde: Path, config_group: Path, destination: Path) -> None:
+def build(viewer: Path, clyde: Path, class_root: Path, destination: Path) -> None:
     with (
         zipfile.ZipFile(viewer) as source,
         zipfile.ZipFile(clyde) as dependency,
         zipfile.ZipFile(destination, "w") as output,
     ):
         for item in source.infolist():
-            if item.filename == CONFIG_GROUP or item.filename.startswith(SOUNDER_PREFIX):
+            if (item.filename == CONFIG_GROUP or item.filename.startswith(CONFIG_GROUP_INNER_PREFIX) or
+                    item.filename.startswith(SOUNDER_PREFIX)):
                 continue
             output.writestr(item, source.read(item.filename))
         for item in dependency.infolist():
             if item.filename.startswith(SOUNDER_PREFIX):
                 output.writestr(item, dependency.read(item.filename))
-        output.writestr(CONFIG_GROUP, config_group.read_bytes())
+        for compiled in class_root.rglob("*.class"):
+            output.writestr(compiled.relative_to(class_root).as_posix(), compiled.read_bytes())
 
 
 def main() -> None:
@@ -52,13 +55,13 @@ def main() -> None:
     package = subparsers.add_parser("build")
     package.add_argument("viewer", type=Path)
     package.add_argument("clyde", type=Path)
-    package.add_argument("config_group", type=Path)
+    package.add_argument("class_root", type=Path)
     package.add_argument("destination", type=Path)
     args = parser.parse_args()
     if args.command == "prepare-classpath":
         compiler_classpath(args.source, args.destination)
     else:
-        build(args.viewer, args.clyde, args.config_group, args.destination)
+        build(args.viewer, args.clyde, args.class_root, args.destination)
 
 
 if __name__ == "__main__":

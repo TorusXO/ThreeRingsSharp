@@ -43,9 +43,10 @@ $compat = Join-Path $buildDeps 'spiralview-compat'
 New-Item -ItemType Directory -Force "$compat/classes" | Out-Null
 python "$PSScriptRoot/patch_spiralview.py" prepare-classpath $viewer "$compat/compiler-classpath.jar"
 if ($LASTEXITCODE) { throw 'Could not prepare the SpiralView compatibility classpath' }
-& $javac --release 21 -cp "$compat/compiler-classpath.jar" -d "$compat/classes" "$PSScriptRoot/spiralview-compat/com/threerings/config/ConfigGroup.java"
+$compatSources = Get-ChildItem -LiteralPath "$PSScriptRoot/spiralview-compat" -Filter '*.java' -Recurse
+& $javac --release 21 -cp "$compat/compiler-classpath.jar" -d "$compat/classes" $compatSources.FullName
 if ($LASTEXITCODE) { throw 'Could not compile the SpiralView compatibility class' }
-python "$PSScriptRoot/patch_spiralview.py" build $viewer $ClydeJar "$compat/classes/com/threerings/config/ConfigGroup.class" "$client/backend/spiralview.jar"
+python "$PSScriptRoot/patch_spiralview.py" build $viewer $ClydeJar "$compat/classes" "$client/backend/spiralview.jar"
 if ($LASTEXITCODE) { throw 'Could not package the SpiralView compatibility layer' }
 Copy-Item -LiteralPath "$PSScriptRoot/third-party/spiralview-LICENSE.txt" -Destination "$client/backend/spiralview-LICENSE.txt" -Force
 Copy-Item -LiteralPath "$PSScriptRoot/third-party/clyde-LICENSE.txt" -Destination "$client/backend/clyde-LICENSE.txt" -Force

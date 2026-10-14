@@ -19,6 +19,9 @@ from pathlib import Path
 import bpy
 from mathutils import Matrix, Quaternion
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from rename_ue_bones import MAPPING as SK_TO_UE
+
 
 def args_from_blender():
     parser = argparse.ArgumentParser()
@@ -43,11 +46,11 @@ def ratio_between(rest, current, first, last):
 
 
 def rotation_deltas(source, target_rest):
-    rest = {bone.name: bone.matrix_local for bone in source.data.bones}
-    deltas = {
-        name: source.pose.bones[name].matrix.to_quaternion() @ matrix.to_quaternion().inverted()
-        for name, matrix in rest.items()
-    }
+    actual_by_logical = {SK_TO_UE.get(bone.name, bone.name): bone.name for bone in source.data.bones}
+    rest = {logical: source.data.bones[actual].matrix_local
+            for logical, actual in actual_by_logical.items()}
+    deltas = {logical: source.pose.bones[actual_by_logical[logical]].matrix.to_quaternion() @
+              matrix.to_quaternion().inverted() for logical, matrix in rest.items()}
     result = {}
     for name in target_rest:
         if name in deltas:
@@ -84,7 +87,7 @@ def rotation_deltas(source, target_rest):
             result[name] = deltas["hand_r"]
         else:
             result[name] = None  # Keep the rest orientation relative to its parent.
-    return rest, result
+    return rest, result, actual_by_logical
 
 
 def ordered_bones(armature):
@@ -100,7 +103,7 @@ def ordered_bones(armature):
 
 
 def target_pose(source, target, target_rest, root_motion_scale):
-    source_rest, deltas = rotation_deltas(source, target_rest)
+    source_rest, deltas, actual_by_logical = rotation_deltas(source, target_rest)
     positions, rotations, desired = {}, {}, {}
     rest_quats = {name: matrix.to_quaternion() for name, matrix in target_rest.items()}
     hand_positions = {}
@@ -112,7 +115,7 @@ def target_pose(source, target, target_rest, root_motion_scale):
         delta.normalize()
         rotations[name] = delta @ rest_quats[name]
         if name == "pelvis":
-            movement = source.pose.bones["pelvis"].matrix.translation - source_rest["pelvis"].translation
+            movement = source.pose.bones[actual_by_logical["pelvis"]].matrix.translation - source_rest["pelvis"].translation
             positions[name] = target_rest[name].translation + movement * root_motion_scale
         elif parent:
             parent_delta = rotations[parent] @ rest_quats[parent].inverted()
@@ -329,7 +332,8 @@ def main():
             raise ValueError("One or more requested clip names are missing")
     if not source_actions:
         raise ValueError("No source TRS Actions found")
-    if not all(name in source.data.bones for name in ("pelvis", "spine_01", "spine_05", "neck_01", "head")):
+    logical_source_bones = {SK_TO_UE.get(name, name) for name in source.data.bones.keys()}
+    if not all(name in logical_source_bones for name in ("pelvis", "spine_01", "spine_05", "neck_01", "head")):
         raise ValueError("Source rig is missing the knight retarget anchors")
     rows = []
     retargeted = {}
@@ -364,9 +368,10 @@ def main():
         "format": "trs-ue-retarget-1", "source": str(source_path),
         "destination": str(destination), "target_armature": target.name,
         "source_bones": len(source_bone_names), "target_bones": len(target.data.bones), "clips": len(rows),
-        "direct_bone_names": sorted(source_bone_names & set(target.data.bones.keys())),
-        "derived_or_rest_bone_names": sorted(set(target.data.bones.keys()) - source_bone_names),
-        "source_only_bone_names": sorted(source_bone_names - set(target.data.bones.keys())),
+        "source_bone_convention": "anatomical" if "pelvis" in source_bone_names else "original SK",
+        "direct_bone_names": sorted(logical_source_bones & set(target.data.bones.keys())),
+        "derived_or_rest_bone_names": sorted(set(target.data.bones.keys()) - logical_source_bones),
+        "source_only_bone_names": sorted(logical_source_bones - set(target.data.bones.keys())),
         "root_motion_scale": args.root_motion_scale,
         "maximum_reconstruction_error": max(row["reconstruction_error"] for row in rows),
         "belt_weights_to_pelvis": belt_weights, "mesh_weight_coverage": coverage,
